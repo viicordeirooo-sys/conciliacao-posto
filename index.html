@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Conciliação — Posto</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080f1a;--card:#0e1c2e;--card2:#112034;--border:#1e3450;
+  --text:#e8f4f8;--muted:#4a7a9b;--accent:#f0a500;--accent2:#e8c547;
+  --blue:#3fa7d6;--green:#2ecc71;--red:#e74c3c;--pink:#e91e8c;
+  --purple:#9b59b6;--font:'DM Sans',sans-serif;--mono:'DM Mono',monospace;
+  --display:'Syne',sans-serif;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;font-size:14px}
+
+/* LOGIN */
+#login-screen{
+  position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  background:var(--bg);z-index:1000;
+  background-image:radial-gradient(ellipse at 20% 50%, #0a2040 0%, transparent 60%),
+                   radial-gradient(ellipse at 80% 20%, #0f1a0a 0%, transparent 50%);
+}
+.login-box{
+  background:var(--card);border:1px solid var(--border);border-radius:20px;
+  padding:48px 40px;width:100%;max-width:380px;
+  box-shadow:0 0 80px #f0a50010,0 20px 60px #00000080;
+}
+.login-logo{font-family:var(--display);font-size:13px;font-weight:700;color:var(--muted);letter-spacing:3px;text-transform:uppercase;margin-bottom:32px}
+.login-logo span{color:var(--accent)}
+.login-title{font-family:var(--display);font-size:28px;font-weight:800;margin-bottom:6px;line-height:1.1}
+.login-sub{font-size:13px;color:var(--muted);margin-bottom:32px}
+.login-input{
+  width:100%;background:#060e1a;border:1px solid var(--border);border-radius:10px;
+  padding:14px 16px;color:var(--text);font-size:15px;font-family:var(--mono);
+  outline:none;letter-spacing:2px;transition:border-color .2s;
+}
+.login-input:focus{border-color:var(--accent)}
+.login-btn{
+  width:100%;margin-top:16px;background:var(--accent);color:#0a0a0a;
+  border:none;border-radius:10px;padding:14px;font-family:var(--display);
+  font-size:14px;font-weight:700;cursor:pointer;letter-spacing:1px;
+  transition:opacity .15s;
+}
+.login-btn:hover{opacity:.9}
+.login-error{margin-top:12px;font-size:12px;color:var(--red);text-align:center;min-height:18px}
+
+/* APP */
+#app{display:none}
+.header{
+  background:linear-gradient(180deg,#0a1628 0%,#080f1a 100%);
+  border-bottom:1px solid var(--border);padding:16px 20px 0;
+  position:sticky;top:0;z-index:100;
+}
+.header-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px}
+.site-name{font-family:var(--display);font-size:11px;font-weight:700;color:var(--muted);letter-spacing:3px;text-transform:uppercase}
+.site-name span{color:var(--accent)}
+.posto-name{font-family:var(--display);font-size:18px;font-weight:800;line-height:1}
+.posto-sub{font-size:11px;color:var(--muted);margin-top:2px}
+.logout-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:6px 12px;font-size:11px;cursor:pointer;font-family:var(--font)}
+.logout-btn:hover{border-color:var(--muted)}
+.tabs{display:flex;gap:0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab-btn{
+  padding:10px 18px;border:none;cursor:pointer;font-size:12px;font-weight:600;
+  background:transparent;color:var(--muted);border-radius:8px 8px 0 0;
+  white-space:nowrap;transition:all .15s;font-family:var(--font);
+  border-bottom:2px solid transparent;
+}
+.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent);background:rgba(240,165,0,.05)}
+
+/* BODY */
+.body{padding:20px;max-width:1000px;margin:0 auto}
+
+/* CARDS */
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px 20px;margin-bottom:16px}
+.card-blue{background:#060e1a;border-color:#1e3a5f}
+.sec-title{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:14px}
+
+/* STAT CARDS */
+.stats-row{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.stat-card{background:var(--card);border-radius:12px;padding:14px 16px;flex:1;min-width:90px;border-left:3px solid transparent}
+.stat-label{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.stat-value{font-family:var(--display);font-size:20px;font-weight:800;margin:4px 0 2px;line-height:1}
+.stat-sub{font-size:10px;color:var(--muted)}
+
+/* FORM */
+.form-grid{display:grid;gap:12px;margin-bottom:14px}
+.form-grid-4{grid-template-columns:1fr 1fr 1fr 1fr}
+.form-grid-3{grid-template-columns:1fr 1fr 1fr}
+.form-grid-2{grid-template-columns:1fr 1fr}
+@media(max-width:640px){
+  .form-grid-4,.form-grid-3{grid-template-columns:1fr 1fr}
+}
+@media(max-width:400px){
+  .form-grid-4,.form-grid-3,.form-grid-2{grid-template-columns:1fr}
+}
+label.lbl{font-size:11px;font-weight:600;color:var(--muted);display:block;margin-bottom:4px}
+input[type=text],input[type=number],input[type=date],select,textarea{
+  background:#060e1a;border:1px solid var(--border);border-radius:8px;
+  padding:9px 12px;color:var(--text);font-size:13px;width:100%;outline:none;
+  font-family:var(--font);transition:border-color .2s;
+}
+input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+select{cursor:pointer}
+textarea{resize:vertical;font-family:var(--mono);font-size:11px}
+
+/* BUTTONS */
+.btn{background:var(--accent);color:#0a0a0a;border:none;border-radius:9px;padding:10px 20px;font-weight:700;font-size:13px;cursor:pointer;font-family:var(--font);transition:opacity .15s;white-space:nowrap}
+.btn:hover{opacity:.88}
+.btn-dark{background:var(--card2);color:var(--text);border:1px solid var(--border)}
+.btn-dark:hover{border-color:var(--muted)}
+.btn-sm{background:transparent;color:var(--red);border:1px solid var(--red);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--font)}
+.btn-sm:hover{background:#e74c3c20}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+
+/* TABLES */
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{padding:9px 12px;text-align:left;font-size:10px;font-weight:700;color:var(--muted);border-bottom:1px solid var(--border);letter-spacing:.5px;text-transform:uppercase}
+td{padding:9px 12px;border-bottom:1px solid #0e1c2e;vertical-align:middle}
+tr:hover td{background:#0a1628}
+.table-wrap{overflow-x:auto}
+
+/* BADGES */
+.badge{display:inline-block;border-radius:20px;padding:3px 10px;font-size:10px;font-weight:700;white-space:nowrap}
+.badge-ok{background:#0d3320;color:#2ecc71;border:1px solid #2ecc7140}
+.badge-div{background:#3a2800;color:#f0a500;border:1px solid #f0a50040}
+.badge-late{background:#3a0020;color:#e91e8c;border:1px solid #e91e8c40}
+.badge-open{background:#2a0d0d;color:#e74c3c;border:1px solid #e74c3c40}
+.badge-due{background:#0a1e30;color:#3fa7d6;border:1px solid #3fa7d640}
+
+/* ALERTS */
+.alert-late{background:#1a0010;border:1px solid #e91e8c40;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:13px;color:#f48fb1}
+
+/* PILL FILTERS */
+.pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.pill{padding:5px 12px;border-radius:20px;font-size:11px;cursor:pointer;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--muted);font-family:var(--font);transition:all .15s}
+.pill.active{background:var(--accent);color:#0a0a0a;border-color:var(--accent)}
+
+/* PREVIEW BOX */
+.preview-box{margin-top:12px;background:#060e1a;border:1px solid var(--border);border-radius:9px;padding:12px 14px;font-size:12px}
+.preview-row{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:6px}
+.preview-item{color:var(--muted)}
+.preview-item strong{color:var(--text)}
+
+/* MDR BANDEIRAS */
+.band-pills{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.band-pill{padding:5px 14px;border-radius:20px;font-size:11px;cursor:pointer;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--muted);font-family:var(--font)}
+.band-pill.active{background:var(--accent);color:#0a0a0a;border-color:var(--accent)}
+
+/* MODAL */
+.modal-overlay{position:fixed;inset:0;background:#00000099;display:flex;align-items:center;justify-content:center;z-index:500;padding:16px}
+.modal-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;width:100%;max-width:520px}
+.modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.modal-close{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer}
+
+/* MSG */
+.msg-ok{font-size:12px;color:var(--green);margin-top:8px}
+.msg-err{font-size:12px;color:var(--red);margin-top:8px}
+
+/* EMPTY */
+.empty{text-align:center;color:var(--muted);padding:36px;font-size:13px}
+
+/* TAG FDS */
+.tag{display:inline-block;font-size:9px;padding:1px 6px;border-radius:8px;margin-left:5px;font-weight:700}
+.tag-fds{background:#0c2a4a;color:var(--blue)}
+.tag-fer{background:#2a1a00;color:var(--accent)}
+
+/* RESUMO */
+.resumo-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
+@media(max-width:500px){.resumo-grid{grid-template-columns:1fr 1fr}}
+
+.sync-dot{width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block;margin-right:5px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">⛽ <span>Conciliação</span> · Posto</div>
+    <div class="login-title">Acesso ao sistema</div>
+    <div class="login-sub">Digite a senha para continuar</div>
+    <input class="login-input" type="password" id="login-input" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"/>
+    <button class="login-btn" onclick="doLogin()">Entrar</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <div class="site-name">⛽ <span>Conciliação</span></div>
+        <div class="posto-name" id="posto-name-header">Posto 1</div>
+        <div class="posto-sub"><span class="sync-dot"></span>Sincronizado com Firebase</div>
+      </div>
+      <button class="logout-btn" onclick="doLogout()">Sair</button>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn active" onclick="showTab('conciliacao',this)">🔍 Conciliação</button>
+      <button class="tab-btn" onclick="showTab('vendas',this)">📋 Vendas</button>
+      <button class="tab-btn" onclick="showTab('extrato',this)">🏦 Extrato</button>
+      <button class="tab-btn" onclick="showTab('resumo',this)">📊 Resumo</button>
+      <button class="tab-btn" onclick="showTab('config',this)">⚙️ Config</button>
+    </div>
+  </div>
+
+  <div class="body">
+    <div id="tab-conciliacao"></div>
+    <div id="tab-vendas" style="display:none"></div>
+    <div id="tab-extrato" style="display:none"></div>
+    <div id="tab-resumo" style="display:none"></div>
+    <div id="tab-config" style="display:none"></div>
+  </div>
+</div>
+
+<!-- MODAL EXPORT -->
+<div class="modal-overlay" id="export-modal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-header">
+      <strong>📋 Exportar dados</strong>
+      <button class="modal-close" onclick="closeModal('export-modal')">✕</button>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Copie e envie para outro usuário importar.</p>
+    <textarea id="export-text" style="height:180px;width:100%" readonly onclick="this.select()"></textarea>
+    <div class="btn-row">
+      <button class="btn" onclick="copyExport()">📋 Copiar tudo</button>
+      <button class="btn btn-dark" onclick="closeModal('export-modal')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL IMPORT -->
+<div class="modal-overlay" id="import-modal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-header">
+      <strong>⬆ Importar dados</strong>
+      <button class="modal-close" onclick="closeModal('import-modal')">✕</button>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Cole o texto exportado de outro dispositivo.</p>
+    <textarea id="import-text" style="height:160px;width:100%" placeholder='{"sales":[...],"bank":[...],...}'></textarea>
+    <div class="btn-row">
+      <button class="btn" onclick="doImport()">✅ Importar</button>
+      <button class="btn btn-dark" onclick="closeModal('import-modal')">Cancelar</button>
+    </div>
+    <div id="import-msg"></div>
+  </div>
+</div>
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDEX0JBCidS4yEfvgnT-rKW6se-g8_t5qM",
+  authDomain: "conciliacao-posto.firebaseapp.com",
+  projectId: "conciliacao-posto",
+  storageBucket: "conciliacao-posto.firebasestorage.app",
+  messagingSenderId: "471676139",
+  appId: "1:471676139:web:33e26d5d87c059d1b13aae"
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const db = getFirestore(fbApp);
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const SENHA = "Piazentin";
+const DOC_ID = "posto1";
+
+const DEFAULT_HOLIDAYS = [
+  "2025-01-01","2025-03-03","2025-03-04","2025-04-18","2025-04-19",
+  "2025-04-21","2025-05-01","2025-06-19","2025-09-07","2025-10-12",
+  "2025-11-02","2025-11-15","2025-11-20","2025-12-25",
+  "2026-01-01","2026-02-16","2026-02-17","2026-04-03","2026-04-05",
+  "2026-04-21","2026-05-01","2026-06-04","2026-09-07","2026-10-12",
+  "2026-11-02","2026-11-15","2026-11-20","2026-12-25",
+];
+
+const BANDEIRAS = ["Visa","Mastercard","Elo","Hipercard","Amex","VR","VA","Pix","Outro"];
+const MODALITIES = [
+  {name:"Débito",corridos:false,d:1},
+  {name:"Crédito À Vista",corridos:true,d:30},
+  {name:"Crédito 2–6x",corridos:true,d:30},
+  {name:"Crédito 7–12x",corridos:true,d:30},
+  {name:"Voucher (VR/VA)",corridos:false,d:1},
+  {name:"Pix",corridos:false,d:0},
+];
+
+const DEFAULT_MDR = {
+  "Visa":      {"Débito":1.49,"Crédito À Vista":1.99,"Crédito 2–6x":2.39,"Crédito 7–12x":2.79,"Voucher (VR/VA)":0,"Pix":0},
+  "Mastercard":{"Débito":1.49,"Crédito À Vista":1.99,"Crédito 2–6x":2.39,"Crédito 7–12x":2.79,"Voucher (VR/VA)":0,"Pix":0},
+  "Elo":       {"Débito":1.59,"Crédito À Vista":2.19,"Crédito 2–6x":2.59,"Crédito 7–12x":2.99,"Voucher (VR/VA)":0,"Pix":0},
+  "Hipercard": {"Débito":0,   "Crédito À Vista":2.29,"Crédito 2–6x":2.69,"Crédito 7–12x":3.09,"Voucher (VR/VA)":0,"Pix":0},
+  "Amex":      {"Débito":0,   "Crédito À Vista":2.99,"Crédito 2–6x":2.99,"Crédito 7–12x":2.99,"Voucher (VR/VA)":0,"Pix":0},
+  "VR":        {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":1.39,"Pix":0},
+  "VA":        {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":1.39,"Pix":0},
+  "Pix":       {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0.90},
+  "Outro":     {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0},
+};
+
+const DEFAULT_CONFIG = {
+  postoName:"Posto 1",
+  liquidation:Object.fromEntries(MODALITIES.map(m=>[m.name,m.d])),
+  corridos:Object.fromEntries(MODALITIES.map(m=>[m.name,m.corridos])),
+  holidays:DEFAULT_HOLIDAYS,
+  tolerance:2,
+};
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let STATE = {sales:[],bank:[],mdr:DEFAULT_MDR,config:DEFAULT_CONFIG};
+let currentTab = "conciliacao";
+let filterStatus = "todos";
+let filterMonth = "";
+let mdrBandeira = "Visa";
+let saveTimeout = null;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function todays(){ return new Date().toISOString().slice(0,10); }
+function fmtBRL(v){ return (v||0).toLocaleString("pt-BR",{style:"currency",currency:"BRL"}); }
+function fmtDate(s){ if(!s)return "—"; const[y,m,d]=s.split("-"); return `${d}/${m}/${y}`; }
+function uid(){ return Math.random().toString(36).slice(2,10); }
+function monthKey(s){ return s?.slice(0,7); }
+function monthLabel(k){ if(!k)return ""; const[y,m]=k.split("-"); const n=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]; return `${n[+m-1]}/${y}`; }
+function pct(v){ return (v||0).toFixed(2)+"%" }
+
+function addBusinessDays(dateStr,n,holidays){
+  if(n===0)return dateStr;
+  const hs=new Set(holidays);
+  let d=new Date(dateStr+"T12:00:00"),count=0;
+  while(count<n){
+    d.setDate(d.getDate()+1);
+    const dw=d.getDay(),ds=d.toISOString().slice(0,10);
+    if(dw!==0&&dw!==6&&!hs.has(ds))count++;
+  }
+  return d.toISOString().slice(0,10);
+}
+
+function addCalendarDays(dateStr,n){
+  if(n===0)return dateStr;
+  const d=new Date(dateStr+"T12:00:00");
+  d.setDate(d.getDate()+n);
+  return d.toISOString().slice(0,10);
+}
+
+function calcDeposit(dateStr,modality){
+  const days=STATE.config.liquidation[modality]??1;
+  const corridos=STATE.config.corridos[modality]??false;
+  return corridos?addCalendarDays(dateStr,days):addBusinessDays(dateStr,days,STATE.config.holidays);
+}
+
+function getMDR(bandeira,modality){
+  return (STATE.mdr[bandeira]?.[modality]??0)/100;
+}
+
+function enrichSale(s){
+  const taxa=getMDR(s.bandeira,s.modality);
+  const bruto=Number(s.amount);
+  const custoMDR=bruto*taxa;
+  const liquido=bruto-custoMDR;
+  const expectedDate=calcDeposit(s.date,s.modality);
+  return {...s,taxa,custoMDR,liquido,bruto,expectedDate};
+}
+
+function getReconciliation(){
+  const today=todays();
+  const enriched=STATE.sales.map(enrichSale);
+  const groups={};
+  enriched.forEach(s=>{
+    const k=s.expectedDate;
+    if(!groups[k])groups[k]={date:k,bruto:0,custoMDR:0,liquido:0,sales:[],bandeiras:{}};
+    groups[k].bruto+=s.bruto;
+    groups[k].custoMDR+=s.custoMDR;
+    groups[k].liquido+=s.liquido;
+    groups[k].sales.push(s);
+    groups[k].bandeiras[s.bandeira]=(groups[k].bandeiras[s.bandeira]||0)+s.bruto;
+  });
+  const bankByDate={};
+  STATE.bank.forEach(e=>{bankByDate[e.date]=(bankByDate[e.date]||0)+Number(e.amount);});
+  return Object.values(groups).map(g=>{
+    const actual=bankByDate[g.date]||0;
+    const diff=actual-g.liquido;
+    const has=bankByDate[g.date]!==undefined;
+    let status;
+    if(has){status=Math.abs(diff)<=STATE.config.tolerance?"conciliado":"divergencia";}
+    else if(g.date<today){
+      const diffDays=Math.floor((new Date(today)-new Date(g.date))/(86400000));
+      status=diffDays>=2?"atrasado":"em_aberto";
+    }else{status="a_vencer";}
+    return {...g,actual,diff,status};
+  }).sort((a,b)=>b.date.localeCompare(a.date));
+}
+
+// ─── Firebase ─────────────────────────────────────────────────────────────────
+async function loadFromFirebase(){
+  const ref=doc(db,"conciliacao",DOC_ID);
+  const snap=await getDoc(ref);
+  if(snap.exists()){
+    const d=snap.data();
+    if(d.sales)STATE.sales=d.sales;
+    if(d.bank)STATE.bank=d.bank;
+    if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
+    if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+  }
+}
+
+function saveToFirebase(){
+  if(saveTimeout)clearTimeout(saveTimeout);
+  saveTimeout=setTimeout(async()=>{
+    const ref=doc(db,"conciliacao",DOC_ID);
+    await setDoc(ref,{sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config});
+  },800);
+}
+
+onSnapshot(doc(db,"conciliacao",DOC_ID),(snap)=>{
+  if(snap.exists()&&snap.metadata.hasPendingWrites===false){
+    const d=snap.data();
+    if(d.sales)STATE.sales=d.sales;
+    if(d.bank)STATE.bank=d.bank;
+    if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
+    if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+    renderCurrentTab();
+  }
+});
+
+// ─── Login ────────────────────────────────────────────────────────────────────
+window.doLogin=function(){
+  const v=document.getElementById("login-input").value;
+  if(v===SENHA){
+    document.getElementById("login-screen").style.display="none";
+    document.getElementById("app").style.display="block";
+    loadFromFirebase().then(()=>{ renderCurrentTab(); });
+  }else{
+    document.getElementById("login-error").textContent="Senha incorreta.";
+    setTimeout(()=>document.getElementById("login-error").textContent="",2000);
+  }
+};
+
+window.doLogout=function(){
+  document.getElementById("app").style.display="none";
+  document.getElementById("login-screen").style.display="flex";
+  document.getElementById("login-input").value="";
+};
+
+// ─── Tabs ─────────────────────────────────────────────────────────────────────
+window.showTab=function(name,btn){
+  document.querySelectorAll(".tab-btn").forEach(b=>b.classList.remove("active"));
+  document.querySelectorAll("[id^='tab-']").forEach(t=>t.style.display="none");
+  btn.classList.add("active");
+  document.getElementById("tab-"+name).style.display="";
+  currentTab=name;
+  renderTab(name);
+};
+
+function renderCurrentTab(){ renderTab(currentTab); }
+
+function renderTab(name){
+  if(name==="conciliacao")renderConciliacao();
+  else if(name==="vendas")renderVendas();
+  else if(name==="extrato")renderExtrato();
+  else if(name==="resumo")renderResumo();
+  else if(name==="config")renderConfig();
+  document.getElementById("posto-name-header").textContent=STATE.config.postoName;
+}
+
+// ─── CONCILIAÇÃO ──────────────────────────────────────────────────────────────
+function renderConciliacao(){
+  const rec=getReconciliation();
+  const enriched=STATE.sales.map(enrichSale);
+  const stats={
+    conciliado:rec.filter(r=>r.status==="conciliado").length,
+    divergencia:rec.filter(r=>r.status==="divergencia").length,
+    atrasado:rec.filter(r=>r.status==="atrasado").length,
+    em_aberto:rec.filter(r=>r.status==="em_aberto").length,
+    a_vencer:rec.filter(r=>r.status==="a_vencer").length,
+    totalBruto:enriched.reduce((a,s)=>a+s.bruto,0),
+    totalMDR:enriched.reduce((a,s)=>a+s.custoMDR,0),
+    totalLiquido:enriched.reduce((a,s)=>a+s.liquido,0),
+    totalBanco:STATE.bank.reduce((a,e)=>a+Number(e.amount),0),
+  };
+
+  const months=[...new Set(rec.map(r=>monthKey(r.date)))].sort().reverse();
+  if(!filterMonth&&months.length)filterMonth=months[0];
+
+  let filtered=filterStatus==="todos"?rec:rec.filter(r=>r.status===filterStatus);
+  if(filterMonth)filtered=filtered.filter(r=>monthKey(r.date)===filterMonth);
+
+  const alertHtml=stats.atrasado>0?`
+    <div class="alert-late">🚨 <strong>${stats.atrasado} depósito${stats.atrasado>1?"s":""} em atraso</strong> — a data passou e o valor não entrou no banco. Verifique com a adquirente.</div>
+  `:"";
+
+  const monthOpts=months.map(m=>`<option value="${m}"${filterMonth===m?"selected":""}>${monthLabel(m)}</option>`).join("");
+  const statusOpts=["todos","conciliado","divergencia","atrasado","em_aberto","a_vencer"];
+  const statusLabels={"todos":"Todos","conciliado":"✅ Conciliado","divergencia":"⚠️ Divergência","atrasado":"🚨 Atrasado","em_aberto":"❌ Em Aberto","a_vencer":"⏳ A Vencer"};
+
+  const rows=filtered.map((r,i)=>{
+    const dates=[...new Set(r.sales.map(s=>fmtDate(s.date)))].join(", ");
+    const bands=Object.entries(r.bandeiras).map(([b,v])=>`<span style="background:#0a1628;border:1px solid var(--border);border-radius:10px;padding:1px 7px;font-size:10px;color:var(--muted);margin:1px;display:inline-block">${b}: ${fmtBRL(v)}</span>`).join("");
+    const badge=getBadge(r.status);
+    const diffStr=["a_vencer","em_aberto","atrasado"].includes(r.status)?"—":(r.diff>=0?"+":"")+fmtBRL(r.diff);
+    const diffColor=Math.abs(r.diff)<.01?"var(--muted)":r.diff>0?"var(--accent)":"var(--red)";
+    return `<tr>
+      <td>${dates}</td>
+      <td style="font-weight:700;color:${r.status==="atrasado"?"var(--pink)":r.date<=todays()?"var(--text)":"var(--blue)"}">${fmtDate(r.date)}</td>
+      <td>${bands}</td>
+      <td style="color:var(--purple)">${fmtBRL(r.bruto)}</td>
+      <td style="color:var(--red);font-size:11px">${fmtBRL(r.custoMDR)}</td>
+      <td style="color:var(--green);font-weight:600">${fmtBRL(r.liquido)}</td>
+      <td style="color:var(--blue);font-weight:600">${r.actual>0?fmtBRL(r.actual):"—"}</td>
+      <td style="font-weight:700;color:${diffColor}">${diffStr}</td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join("");
+
+  document.getElementById("tab-conciliacao").innerHTML=`
+    ${alertHtml}
+    <div class="stats-row">
+      <div class="stat-card" style="border-color:var(--green)"><div class="stat-label">Conciliados</div><div class="stat-value" style="color:var(--green)">${stats.conciliado}</div></div>
+      <div class="stat-card" style="border-color:var(--accent)"><div class="stat-label">Divergências</div><div class="stat-value" style="color:var(--accent)">${stats.divergencia}</div></div>
+      <div class="stat-card" style="border-color:var(--pink)"><div class="stat-label">Atrasados</div><div class="stat-value" style="color:var(--pink)">${stats.atrasado}</div></div>
+      <div class="stat-card" style="border-color:var(--blue)"><div class="stat-label">A Vencer</div><div class="stat-value" style="color:var(--blue)">${stats.a_vencer}</div></div>
+      <div class="stat-card" style="border-color:var(--purple)"><div class="stat-label">Total Bruto</div><div class="stat-value" style="color:var(--purple);font-size:14px">${fmtBRL(stats.totalBruto)}</div><div class="stat-sub">MDR: ${fmtBRL(stats.totalMDR)}</div></div>
+      <div class="stat-card" style="border-color:var(--green)"><div class="stat-label">Líquido Esp.</div><div class="stat-value" style="color:var(--green);font-size:14px">${fmtBRL(stats.totalLiquido)}</div><div class="stat-sub">Banco: ${fmtBRL(stats.totalBanco)}</div></div>
+    </div>
+    <div class="card" style="padding:10px 16px;margin-bottom:14px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select style="width:130px;font-size:11px" onchange="setFilterMonth(this.value)">
+          <option value="">Todos os meses</option>${monthOpts}
+        </select>
+        <div class="pills">
+          ${statusOpts.map(s=>`<button class="pill${filterStatus===s?" active":""}" onclick="setFilterStatus('${s}')">${statusLabels[s]}</button>`).join("")}
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      ${filtered.length===0?`<div class="empty">Nenhum registro. Lance vendas na aba Vendas.</div>`:`
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Data Venda</th><th>Depósito Esperado</th><th>Bandeiras</th>
+            <th>Bruto</th><th>MDR</th><th>Líquido Esp.</th><th>Banco</th><th>Dif.</th><th>Status</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`}
+    </div>
+  `;
+}
+
+window.setFilterStatus=function(s){filterStatus=s;renderConciliacao();}
+window.setFilterMonth=function(m){filterMonth=m;renderConciliacao();}
+
+function getBadge(status){
+  const map={conciliado:["badge-ok","✅ Conciliado"],divergencia:["badge-div","⚠️ Divergência"],atrasado:["badge-late","🚨 Atrasado"],em_aberto:["badge-open","❌ Em Aberto"],a_vencer:["badge-due","⏳ A Vencer"]};
+  const[cls,label]=map[status]||["",""];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+// ─── VENDAS ───────────────────────────────────────────────────────────────────
+let vForm={date:todays(),bandeira:"Visa",modality:"Débito",amount:""};
+
+function renderVendas(){
+  const enriched=STATE.sales.map(enrichSale);
+  const preview=calcPreview();
+
+  const modOpts=MODALITIES.map(m=>`<option value="${m.name}"${vForm.modality===m.name?"selected":""}>${m.name}</option>`).join("");
+  const bandOpts=BANDEIRAS.map(b=>`<option value="${b}"${vForm.bandeira===b?"selected":""}>${b}</option>`).join("");
+
+  const prevHtml=vForm.amount&&Number(vForm.amount)>0?`
+    <div class="preview-box">
+      <div class="preview-row">
+        <span class="preview-item">Bruto: <strong style="color:var(--purple)">${fmtBRL(preview.bruto)}</strong></span>
+        <span class="preview-item">Taxa MDR: <strong style="color:var(--red)">${pct(preview.taxa*100)}</strong></span>
+        <span class="preview-item">Custo MDR: <strong style="color:var(--red)">${fmtBRL(preview.custoMDR)}</strong></span>
+        <span class="preview-item">Líquido: <strong style="color:var(--green)">${fmtBRL(preview.liquido)}</strong></span>
+      </div>
+      <div style="color:var(--muted);font-size:12px">
+        📅 Depósito esperado: <strong style="color:var(--accent)">${fmtDate(preview.dep)}</strong>
+        &nbsp;·&nbsp; D+${preview.days} ${preview.isCorridos?"corridos":"úteis"}
+        ${!preview.isCorridos&&preview.isFds?`<span class="tag tag-fds">FDS→SEG</span>`:""}
+        ${!preview.isCorridos&&preview.isFer?`<span class="tag tag-fer">FERIADO</span>`:""}
+      </div>
+    </div>`:"";
+
+  const rows=enriched.map(s=>{
+    const dow=new Date(s.date+"T12:00:00").getDay();
+    const isFds=dow===0||dow===6;
+    const isFer=STATE.config.holidays.includes(s.date);
+    return `<tr>
+      <td>${fmtDate(s.date)}${isFds?`<span class="tag tag-fds">FDS</span>`:""}${isFer?`<span class="tag tag-fer">Fer.</span>`:""}</td>
+      <td>${s.bandeira}</td>
+      <td>${s.modality}</td>
+      <td style="color:var(--purple)">${fmtBRL(s.bruto)}</td>
+      <td style="color:var(--red);font-size:11px">${pct(s.taxa*100)}</td>
+      <td style="color:var(--red);font-size:11px">${fmtBRL(s.custoMDR)}</td>
+      <td style="color:var(--green);font-weight:600">${fmtBRL(s.liquido)}</td>
+      <td style="color:var(--accent);font-weight:700">${fmtDate(s.expectedDate)}</td>
+      <td><button class="btn-sm" onclick="deleteSale('${s.id}')">✕</button></td>
+    </tr>`;
+  }).join("");
+
+  document.getElementById("tab-vendas").innerHTML=`
+    <div class="card">
+      <div class="sec-title">Lançar Venda</div>
+      <div class="form-grid form-grid-4">
+        <div><label class="lbl">Data da Venda</label><input type="date" value="${vForm.date}" onchange="vForm.date=this.value;renderVendas()"></div>
+        <div><label class="lbl">Bandeira</label><select onchange="vForm.bandeira=this.value;renderVendas()">${bandOpts}</select></div>
+        <div><label class="lbl">Modalidade</label><select onchange="vForm.modality=this.value;renderVendas()">${modOpts}</select></div>
+        <div><label class="lbl">Valor Bruto (R$)</label><input type="number" step="0.01" min="0" placeholder="0,00" value="${vForm.amount}" oninput="vForm.amount=this.value;renderVendas()" onkeydown="if(event.key==='Enter')addSale()"></div>
+      </div>
+      ${prevHtml}
+      <div class="btn-row">
+        <button class="btn" onclick="addSale()">+ Adicionar</button>
+        <span id="venda-msg"></span>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div class="sec-title" style="margin:0">Vendas Lançadas (${STATE.sales.length})</div>
+        ${STATE.sales.length>0?`<button class="btn-sm" onclick="clearSales()">Limpar tudo</button>`:""}
+      </div>
+      ${STATE.sales.length===0?`<div class="empty">Nenhuma venda ainda.</div>`:`
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Data</th><th>Bandeira</th><th>Modalidade</th><th>Bruto</th><th>Taxa</th><th>MDR</th><th>Líquido</th><th>Depósito</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`}
+    </div>
+  `;
+}
+
+function calcPreview(){
+  const bruto=Number(vForm.amount)||0;
+  const taxa=getMDR(vForm.bandeira,vForm.modality);
+  const custoMDR=bruto*taxa;
+  const liquido=bruto-custoMDR;
+  const days=STATE.config.liquidation[vForm.modality]??1;
+  const isCorridos=STATE.config.corridos[vForm.modality]??false;
+  const dep=calcDeposit(vForm.date,vForm.modality);
+  const dow=new Date(vForm.date+"T12:00:00").getDay();
+  return{bruto,taxa,custoMDR,liquido,days,dep,isCorridos,isFds:dow===0||dow===6,isFer:STATE.config.holidays.includes(vForm.date)};
+}
+
+window.addSale=function(){
+  if(!vForm.date||!vForm.bandeira||!vForm.modality||!vForm.amount||Number(vForm.amount)<=0){
+    showMsg("venda-msg","Preencha todos os campos.","err");return;
+  }
+  STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount)});
+  vForm={...vForm,amount:""};
+  saveToFirebase();
+  showMsg("venda-msg","✅ Adicionado!","ok");
+  renderVendas();
+};
+
+window.deleteSale=function(id){
+  STATE.sales=STATE.sales.filter(s=>s.id!==id);
+  saveToFirebase();renderVendas();
+};
+
+window.clearSales=function(){
+  if(confirm("Apagar todas as vendas?")){{STATE.sales=[];saveToFirebase();renderVendas();}};
+};
+
+// ─── EXTRATO ──────────────────────────────────────────────────────────────────
+let eForm={date:todays(),description:"",amount:""};
+
+function renderExtrato(){
+  const totalDia=STATE.bank.filter(e=>e.date===eForm.date).reduce((a,e)=>a+Number(e.amount),0);
+  const rows=STATE.bank.map(e=>`<tr>
+    <td>${fmtDate(e.date)}</td>
+    <td style="color:var(--muted)">${e.description||"—"}</td>
+    <td style="color:var(--blue);font-weight:600">${fmtBRL(Number(e.amount))}</td>
+    <td><button class="btn-sm" onclick="deleteBank('${e.id}')">✕</button></td>
+  </tr>`).join("");
+
+  document.getElementById("tab-extrato").innerHTML=`
+    <div class="card card-blue">
+      <div style="font-size:12px;color:var(--blue);margin-bottom:14px">
+        💡 <strong>Atenção:</strong> lance o valor <strong>líquido</strong> creditado no banco (já descontado o MDR pela adquirente).
+        Na segunda-feira, lance os créditos do final de semana com data de segunda.
+      </div>
+      <div class="sec-title">Lançar Entrada do Banco</div>
+      <div class="form-grid form-grid-3">
+        <div><label class="lbl">Data do Crédito</label><input type="date" value="${eForm.date}" onchange="eForm.date=this.value;renderExtrato()"></div>
+        <div><label class="lbl">Descrição</label><input type="text" placeholder="ex: CIELO DEBITO 16/05" value="${eForm.description}" oninput="eForm.description=this.value"></div>
+        <div><label class="lbl">Valor Líquido (R$)</label><input type="number" step="0.01" min="0" placeholder="0,00" value="${eForm.amount}" oninput="eForm.amount=this.value" onkeydown="if(event.key==='Enter')addBank()"></div>
+      </div>
+      ${totalDia>0?`<div style="font-size:12px;color:var(--muted);margin-top:8px">Total em ${fmtDate(eForm.date)}: <strong style="color:var(--blue)">${fmtBRL(totalDia)}</strong></div>`:""}
+      <div class="btn-row">
+        <button class="btn" onclick="addBank()">+ Adicionar</button>
+        <span id="extrato-msg"></span>
+      </div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div class="sec-title" style="margin:0">Entradas Lançadas (${STATE.bank.length})</div>
+        ${STATE.bank.length>0?`<button class="btn-sm" onclick="clearBank()">Limpar tudo</button>`:""}
+      </div>
+      ${STATE.bank.length===0?`<div class="empty">Nenhuma entrada ainda.</div>`:`
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Data</th><th>Descrição</th><th>Valor Líquido</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`}
+    </div>
+  `;
+}
+
+window.addBank=function(){
+  if(!eForm.date||!eForm.amount||Number(eForm.amount)<=0){showMsg("extrato-msg","Preencha data e valor.","err");return;}
+  STATE.bank.unshift({...eForm,id:uid(),amount:Number(eForm.amount)});
+  eForm={...eForm,description:"",amount:""};
+  saveToFirebase();showMsg("extrato-msg","✅ Adicionado!","ok");renderExtrato();
+};
+
+window.deleteBank=function(id){
+  STATE.bank=STATE.bank.filter(e=>e.id!==id);
+  saveToFirebase();renderExtrato();
+};
+
+window.clearBank=function(){
+  if(confirm("Apagar todas as entradas?")){{STATE.bank=[];saveToFirebase();renderExtrato();}};
+};
+
+// ─── RESUMO ───────────────────────────────────────────────────────────────────
+let resumoMonth="";
+
+function renderResumo(){
+  const enriched=STATE.sales.map(enrichSale);
+  const months=[...new Set(enriched.map(s=>monthKey(s.date)))].sort().reverse();
+  if(!resumoMonth&&months.length)resumoMonth=months[0];
+
+  const ms=enriched.filter(s=>monthKey(s.date)===resumoMonth);
+  const rec=getReconciliation().filter(r=>monthKey(r.date)===resumoMonth);
+
+  const totalBruto=ms.reduce((a,s)=>a+s.bruto,0);
+  const totalMDR=ms.reduce((a,s)=>a+s.custoMDR,0);
+  const totalLiquido=ms.reduce((a,s)=>a+s.liquido,0);
+  const totalBanco=STATE.bank.filter(e=>monthKey(e.date)===resumoMonth).reduce((a,e)=>a+Number(e.amount),0);
+  const taxaEf=totalBruto>0?totalMDR/totalBruto:0;
+  const diff=totalBanco-totalLiquido;
+
+  // Por bandeira
+  const pb={};
+  ms.forEach(s=>{
+    if(!pb[s.bandeira])pb[s.bandeira]={bruto:0,mdr:0,liquido:0,count:0};
+    pb[s.bandeira].bruto+=s.bruto;pb[s.bandeira].mdr+=s.custoMDR;
+    pb[s.bandeira].liquido+=s.liquido;pb[s.bandeira].count++;
+  });
+  const bandRows=Object.entries(pb).sort((a,b)=>b[1].bruto-a[1].bruto).map(([b,v])=>`<tr>
+    <td style="font-weight:700">${b}</td>
+    <td>${v.count}</td>
+    <td style="color:var(--purple)">${fmtBRL(v.bruto)}</td>
+    <td style="color:var(--red);font-size:11px">${fmtBRL(v.mdr)}</td>
+    <td style="color:var(--green);font-weight:600">${fmtBRL(v.liquido)}</td>
+    <td style="color:var(--muted);font-size:11px">${totalBruto>0?pct(v.mdr/v.bruto*100):"0.00%"}</td>
+  </tr>`).join("");
+
+  const statusMap={conciliado:["var(--green)","✅ Conciliado"],divergencia:["var(--accent)","⚠️ Divergência"],atrasado:["var(--pink)","🚨 Atrasado"],em_aberto:["var(--red)","❌ Em Aberto"],a_vencer:["var(--blue)","⏳ A Vencer"]};
+  const statusCards=Object.entries(statusMap).map(([k,[color,label]])=>{
+    const count=rec.filter(r=>r.status===k).length;
+    return `<div style="background:var(--card2);border-radius:10px;padding:12px 16px;flex:1;min-width:90px;text-align:center;border-left:3px solid ${color}">
+      <div style="font-family:var(--display);font-size:20px;font-weight:800;color:${color}">${count}</div>
+      <div style="font-size:10px;color:var(--muted)">${label}</div>
+    </div>`;
+  }).join("");
+
+  const monthOpts=months.map(m=>`<option value="${m}"${resumoMonth===m?"selected":""}>${monthLabel(m)}</option>`).join("");
+
+  document.getElementById("tab-resumo").innerHTML=`
+    <div class="card" style="padding:12px 16px;margin-bottom:14px">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="sec-title" style="margin:0">Mês:</span>
+        <select style="width:130px" onchange="resumoMonth=this.value;renderResumo()">
+          ${months.length===0?`<option>Sem dados</option>`:""}${monthOpts}
+        </select>
+      </div>
+    </div>
+    <div class="resumo-grid">
+      <div class="stat-card" style="border-color:var(--purple)"><div class="stat-label">Total Bruto</div><div class="stat-value" style="color:var(--purple);font-size:16px">${fmtBRL(totalBruto)}</div></div>
+      <div class="stat-card" style="border-color:var(--red)"><div class="stat-label">Custo MDR</div><div class="stat-value" style="color:var(--red);font-size:16px">${fmtBRL(totalMDR)}</div><div class="stat-sub">Taxa efetiva: ${pct(taxaEf*100)}</div></div>
+      <div class="stat-card" style="border-color:var(--green)"><div class="stat-label">Líquido Esperado</div><div class="stat-value" style="color:var(--green);font-size:16px">${fmtBRL(totalLiquido)}</div></div>
+      <div class="stat-card" style="border-color:var(--blue)"><div class="stat-label">Entrou no Banco</div><div class="stat-value" style="color:var(--blue);font-size:16px">${fmtBRL(totalBanco)}</div></div>
+      <div class="stat-card" style="border-color:${Math.abs(diff)<1?"var(--green)":"var(--accent)"}"><div class="stat-label">Diferença</div><div class="stat-value" style="color:${Math.abs(diff)<1?"var(--green)":"var(--accent)"};font-size:16px">${fmtBRL(diff)}</div></div>
+      <div class="stat-card" style="border-color:var(--muted)"><div class="stat-label">Transações</div><div class="stat-value" style="color:var(--muted)">${ms.length}</div></div>
+    </div>
+    <div class="card">
+      <div class="sec-title">Por Bandeira — ${monthLabel(resumoMonth)}</div>
+      ${ms.length===0?`<div class="empty">Sem vendas neste mês.</div>`:`
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Bandeira</th><th>Qtd</th><th>Bruto</th><th>MDR</th><th>Líquido</th><th>Taxa Ef.</th></tr></thead>
+          <tbody>${bandRows}</tbody>
+        </table>
+      </div>`}
+    </div>
+    <div class="card">
+      <div class="sec-title">Status de Conciliação — ${monthLabel(resumoMonth)}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">${statusCards}</div>
+    </div>
+  `;
+}
+
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
+function renderConfig(){
+  const modRows=MODALITIES.map(m=>`
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <span style="flex:1;font-size:12px">${m.name}</span>
+      <input type="number" min="0" max="90" style="width:60px;text-align:center"
+        value="${STATE.config.liquidation[m.name]??m.d}"
+        onchange="STATE.config.liquidation['${m.name}']=Number(this.value);saveToFirebase()">
+      <select style="width:90px;font-size:11px" onchange="STATE.config.corridos['${m.name}']=this.value==='corridos';saveToFirebase()">
+        <option value="úteis"${!STATE.config.corridos[m.name]?" selected":""}>úteis</option>
+        <option value="corridos"${STATE.config.corridos[m.name]?" selected":""}>corridos</option>
+      </select>
+    </div>`).join("");
+
+  const bandPills=BANDEIRAS.map(b=>`<button class="band-pill${mdrBandeira===b?" active":""}" onclick="setMdrBandeira('${b}')">${b}</button>`).join("");
+
+  const mdrFields=MODALITIES.map(m=>`
+    <div>
+      <label class="lbl">${m.name}</label>
+      <div style="display:flex;align-items:center;gap:6px">
+        <input type="number" step="0.001" min="0" max="20" style="width:100%"
+          value="${(STATE.mdr[mdrBandeira]?.[m.name]??0).toFixed(3)}"
+          onchange="STATE.mdr['${mdrBandeira}']['${m.name}']=Number(this.value);saveToFirebase()">
+        <span style="font-size:12px;color:var(--muted)">%</span>
+      </div>
+    </div>`).join("");
+
+  const upcoming=STATE.config.holidays.filter(h=>h>=todays()).slice(0,16);
+  const holPills=upcoming.map(h=>`
+    <div style="background:#060e1a;border:1px solid var(--border);border-radius:8px;padding:4px 10px;display:flex;align-items:center;gap:6px;font-size:12px">
+      ${fmtDate(h)}
+      <button style="background:none;border:none;color:var(--red);cursor:pointer;font-size:11px;padding:0" onclick="removeHoliday('${h}')">✕</button>
+    </div>`).join("");
+
+  document.getElementById("tab-config").innerHTML=`
+    <div class="card card-blue">
+      <div class="sec-title">Compartilhar / Backup</div>
+      <p style="font-size:12px;color:var(--blue);margin-bottom:14px">Exporte os dados para backup ou para outro dispositivo.</p>
+      <div class="btn-row">
+        <button class="btn" onclick="openExport()">⬇ Exportar dados</button>
+        <button class="btn btn-dark" onclick="openImport()">⬆ Importar dados</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="card">
+        <div class="sec-title">Identificação</div>
+        <div style="margin-bottom:14px">
+          <label class="lbl">Nome do Posto</label>
+          <input type="text" value="${STATE.config.postoName}" onchange="STATE.config.postoName=this.value;saveToFirebase();document.getElementById('posto-name-header').textContent=this.value">
+        </div>
+        <div>
+          <label class="lbl">Tolerância de divergência (R$)</label>
+          <input type="number" min="0" style="width:100px" value="${STATE.config.tolerance}" onchange="STATE.config.tolerance=Number(this.value);saveToFirebase()">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Diferenças menores → ✅ OK</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="sec-title">Prazos de Liquidação</div>
+        ${modRows}
+      </div>
+    </div>
+    <div class="card">
+      <div class="sec-title">Taxas MDR por Bandeira</div>
+      <div class="band-pills">${bandPills}</div>
+      <div class="form-grid form-grid-3">${mdrFields}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:10px">Valores em %. Atualize conforme contrato com sua adquirente.</div>
+    </div>
+    <div class="card">
+      <div class="sec-title">Feriados (${upcoming.length} próximos)</div>
+      <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+        <input type="date" id="new-hol" style="width:160px">
+        <button class="btn" onclick="addHoliday()">+ Adicionar</button>
+        <span id="hol-msg"></span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">${holPills}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:10px">Nacionais 2025–2026 incluídos. Adicione os municipais do seu posto.</div>
+    </div>
+  `;
+}
+
+window.setMdrBandeira=function(b){mdrBandeira=b;renderConfig();}
+
+window.addHoliday=function(){
+  const v=document.getElementById("new-hol").value;
+  if(!v||STATE.config.holidays.includes(v))return;
+  STATE.config.holidays=[...STATE.config.holidays,v].sort();
+  saveToFirebase();showMsg("hol-msg","✅ Adicionado!","ok");renderConfig();
+};
+
+window.removeHoliday=function(h){
+  STATE.config.holidays=STATE.config.holidays.filter(x=>x!==h);
+  saveToFirebase();renderConfig();
+};
+
+// ─── Export/Import ────────────────────────────────────────────────────────────
+window.openExport=function(){
+  document.getElementById("export-text").value=JSON.stringify({sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config,exportedAt:new Date().toISOString()},null,2);
+  document.getElementById("export-modal").style.display="flex";
+};
+
+window.copyExport=function(){
+  navigator.clipboard.writeText(document.getElementById("export-text").value).then(()=>alert("✅ Copiado!"));
+};
+
+window.openImport=function(){
+  document.getElementById("import-modal").style.display="flex";
+};
+
+window.doImport=function(){
+  try{
+    const d=JSON.parse(document.getElementById("import-text").value);
+    if(d.sales)STATE.sales=d.sales;
+    if(d.bank)STATE.bank=d.bank;
+    if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
+    if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+    saveToFirebase();
+    document.getElementById("import-text").value="";
+    closeModal("import-modal");
+    renderCurrentTab();
+    alert("✅ Dados importados!");
+  }catch{document.getElementById("import-msg").innerHTML=`<span class="msg-err">Texto inválido.</span>`;}
+};
+
+window.closeModal=function(id){document.getElementById(id).style.display="none";};
+
+// ─── Helpers UI ───────────────────────────────────────────────────────────────
+function showMsg(id,text,type){
+  const el=document.getElementById(id);
+  if(!el)return;
+  el.innerHTML=`<span class="msg-${type}">${text}</span>`;
+  setTimeout(()=>{if(el)el.innerHTML="";},2500);
+}
+
+// Render initial
+renderConciliacao();
+</script>
+</body>
+</html>
