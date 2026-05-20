@@ -294,21 +294,21 @@ const MODALITIES = [
 ];
 
 const DEFAULT_MDR = {
-  "Visa":      {"Débito":1.49,"Crédito À Vista":1.99,"Crédito 2–6x":2.39,"Crédito 7–12x":2.79,"Voucher (VR/VA)":0,"Pix":0},
-  "Mastercard":{"Débito":1.49,"Crédito À Vista":1.99,"Crédito 2–6x":2.39,"Crédito 7–12x":2.79,"Voucher (VR/VA)":0,"Pix":0},
-  "Elo":       {"Débito":1.59,"Crédito À Vista":2.19,"Crédito 2–6x":2.59,"Crédito 7–12x":2.99,"Voucher (VR/VA)":0,"Pix":0},
-  "Hipercard": {"Débito":0,   "Crédito À Vista":2.29,"Crédito 2–6x":2.69,"Crédito 7–12x":3.09,"Voucher (VR/VA)":0,"Pix":0},
-  "Amex":      {"Débito":0,   "Crédito À Vista":2.99,"Crédito 2–6x":2.99,"Crédito 7–12x":2.99,"Voucher (VR/VA)":0,"Pix":0},
-  "VR":        {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":1.39,"Pix":0},
-  "VA":        {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":1.39,"Pix":0},
-  "Pix":       {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0.90},
+  "Visa":      {"Débito":0.50,"Crédito À Vista":2.50,"Crédito 2–6x":2.50,"Crédito 7–12x":2.50,"Voucher (VR/VA)":0,"Pix":0},
+  "Mastercard":{"Débito":0.50,"Crédito À Vista":2.50,"Crédito 2–6x":2.50,"Crédito 7–12x":2.50,"Voucher (VR/VA)":0,"Pix":0},
+  "Elo":       {"Débito":0.60,"Crédito À Vista":3.70,"Crédito 2–6x":3.70,"Crédito 7–12x":3.70,"Voucher (VR/VA)":0,"Pix":0},
+  "Hipercard": {"Débito":0,   "Crédito À Vista":3.70,"Crédito 2–6x":3.70,"Crédito 7–12x":3.70,"Voucher (VR/VA)":0,"Pix":0},
+  "Amex":      {"Débito":0,   "Crédito À Vista":2.50,"Crédito 2–6x":2.50,"Crédito 7–12x":2.50,"Voucher (VR/VA)":0,"Pix":0},
+  "VR":        {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0},
+  "VA":        {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0},
+  "Pix":       {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0},
   "Outro":     {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0},
 };
 
 const DEFAULT_CONFIG = {
   postoName:"Posto 1",
-  liquidation:Object.fromEntries(MODALITIES.map(m=>[m.name,m.d])),
-  corridos:Object.fromEntries(MODALITIES.map(m=>[m.name,m.corridos])),
+  liquidation:Object.fromEntries(MODALITIES.map(m=>[m.name,0])),
+  corridos:Object.fromEntries(MODALITIES.map(m=>[m.name,false])),
   holidays:DEFAULT_HOLIDAYS,
   tolerance:2,
 };
@@ -617,6 +617,10 @@ function renderVendas(){
       ${prevHtml}
       <div class="btn-row">
         <button class="btn" onclick="addSale()">+ Adicionar</button>
+        <label class="btn btn-dark" style="cursor:pointer">
+          📄 Importar PDF PagBank
+          <input type="file" accept=".pdf" style="display:none" onchange="importPDF(this)">
+        </label>
         <span id="venda-msg"></span>
       </div>
     </div>
@@ -659,6 +663,95 @@ window.addSale=function(){
   renderVendas();
 };
 
+// PDF importer for PagBank sales report
+window.importPDF=function(input){
+  const file=input.files[0]; if(!file) return;
+  showMsg("venda-msg","⏳ Lendo PDF...","ok");
+  const reader=new FileReader();
+  reader.onload=async function(e){
+    try{
+      // Load PDF.js
+      if(!window.pdfjsLib){
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+          s.onload=res; s.onerror=rej;
+          document.head.appendChild(s);
+        });
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+      const pdf=await pdfjsLib.getDocument({data:e.target.result}).promise;
+      let allText='';
+      for(let i=1;i<=pdf.numPages;i++){
+        const page=await pdf.getPage(i);
+        const content=await page.getTextContent();
+        allText+=content.items.map(x=>x.str).join(' ')+'\n';
+      }
+      const imported=parsePagBankPDF(allText);
+      if(imported.length===0){showMsg("venda-msg","Nenhuma transação encontrada no PDF.","err");return;}
+      // Deduplicate by checking existing ids
+      const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
+      const news=imported.filter(s=>!existingIds.has(s.extId));
+      STATE.sales=[...news,...STATE.sales];
+      saveToFirebase();
+      showMsg("venda-msg",`✅ ${news.length} transações importadas! (${imported.length-news.length} duplicatas ignoradas)`,"ok");
+      renderVendas();
+    }catch(err){
+      showMsg("venda-msg","Erro ao ler PDF: "+err.message,"err");
+    }
+    input.value="";
+  };
+  reader.readAsArrayBuffer(file);
+};
+
+function parsePagBankPDF(text){
+  const sales=[];
+  // Pattern: date time, tipo transação, bandeira, bruto, taxa, liquido
+  // "19/05/2026 23:47 Pagbank Débito Mastercard ... R$ 20,00 R$ 0,10 R$ 19,90"
+  const lines=text.split('\n');
+  const dateRe=/(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})/;
+  const valRe=/R\$\s*([\d.,]+)/g;
+
+  // Map tipo from PDF to system modality+bandeira
+  function mapTipo(tipo){
+    const t=tipo.toLowerCase();
+    let bandeira="Outro", modality="Débito";
+    if(t.includes("mastercard"))bandeira="Mastercard";
+    else if(t.includes("visa"))bandeira="Visa";
+    else if(t.includes("elo"))bandeira="Elo";
+    else if(t.includes("hipercard"))bandeira="Hipercard";
+    else if(t.includes("amex")||t.includes("american"))bandeira="Amex";
+    else if(t.includes("pix")){bandeira="Pix";modality="Pix";}
+
+    if(t.includes("débito")||t.includes("debito"))modality="Débito";
+    else if(t.includes("crédito")||t.includes("credito")){
+      if(t.includes("2x")||t.includes("3x")||t.includes("4x")||t.includes("5x")||t.includes("6x"))modality="Crédito 2–6x";
+      else if(t.includes("7x")||t.includes("8x")||t.includes("9x")||t.includes("10x")||t.includes("11x")||t.includes("12x"))modality="Crédito 7–12x";
+      else modality="Crédito À Vista";
+    }
+    else if(t.includes("voucher")||t.includes("vr")||t.includes("va"))modality="Voucher (VR/VA)";
+    else if(t.includes("pix"))modality="Pix";
+    return{bandeira,modality};
+  }
+
+  // Find transactions: look for date+time pattern followed by values
+  const combined=text.replace(/\s+/g,' ');
+  const txRe=/(\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}\s+Pagbank\s+([\w\sàáâãéêíóôõúç]+?)\s+(?:Aprovad[ao])\s+R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)/gi;
+  let m;
+  while((m=txRe.exec(combined))!==null){
+    const dateStr=m[1]; // dd/mm/yyyy
+    const tipo=m[2].trim();
+    const bruto=parseFloat(m[3].replace('.','').replace(',','.'));
+    // m[4]=taxa, m[5]=liquido — we use bruto as the sale amount (system recalculates MDR)
+    const{bandeira,modality}=mapTipo(tipo);
+    const[d,mo,y]=dateStr.split('/');
+    const isoDate=`${y}-${mo}-${d}`;
+    const extId=`pb_${dateStr}_${tipo}_${bruto}`.replace(/\s/g,'_');
+    sales.push({id:uid(),extId,date:isoDate,bandeira,modality,amount:bruto});
+  }
+  return sales;
+}
+
 window.deleteSale=function(id){
   STATE.sales=STATE.sales.filter(s=>s.id!==id);
   saveToFirebase();renderVendas();
@@ -695,6 +788,10 @@ function renderExtrato(){
       ${totalDia>0?`<div style="font-size:12px;color:var(--muted);margin-top:8px">Total em ${fmtDate(eForm.date)}: <strong style="color:var(--blue)">${fmtBRL(totalDia)}</strong></div>`:""}
       <div class="btn-row">
         <button class="btn" onclick="addBank()">+ Adicionar</button>
+        <label class="btn btn-dark" style="cursor:pointer">
+          📊 Importar XLSX PagBank
+          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importXLSX(this)">
+        </label>
         <span id="extrato-msg"></span>
       </div>
     </div>
@@ -719,6 +816,68 @@ window.addBank=function(){
   STATE.bank.unshift({...eForm,id:uid(),amount:Number(eForm.amount)});
   eForm={...eForm,description:"",amount:""};
   saveToFirebase();showMsg("extrato-msg","✅ Adicionado!","ok");renderExtrato();
+};
+
+// XLSX importer for PagBank bank statement
+window.importXLSX=function(input){
+  const file=input.files[0]; if(!file) return;
+  showMsg("extrato-msg","⏳ Lendo XLSX...","ok");
+  const reader=new FileReader();
+  reader.onload=async function(e){
+    try{
+      if(!window.XLSX){
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+          s.onload=res; s.onerror=rej;
+          document.head.appendChild(s);
+        });
+      }
+      const wb=XLSX.read(e.target.result,{type:'array'});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+
+      // Layout: col0=Data, col2=Tipo, col4=Descrição, col5=Entradas
+      // Header row is index 8, data starts at 9
+      const imported=[];
+      for(let i=9;i<rows.length;i++){
+        const row=rows[i];
+        const dateRaw=row[0]; // "19/05/2026" or date serial
+        const tipo=String(row[2]||"").trim();
+        const desc=String(row[4]||"").trim();
+        const entradas=row[5];
+
+        if(!dateRaw||!entradas||isNaN(Number(entradas))||Number(entradas)<=0) continue;
+        if(tipo.toLowerCase().includes("saldo")) continue;
+
+        // Parse date
+        let isoDate="";
+        if(typeof dateRaw==="string"&&dateRaw.includes("/")){
+          const[d,m,y]=dateRaw.split("/");
+          isoDate=`${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
+        } else if(typeof dateRaw==="number"){
+          // Excel serial date
+          const jsDate=new Date((dateRaw-25569)*86400*1000);
+          isoDate=jsDate.toISOString().slice(0,10);
+        } else continue;
+
+        const extId=`bk_${isoDate}_${desc}_${entradas}`.replace(/\s/g,'_');
+        imported.push({id:uid(),extId,date:isoDate,description:desc,amount:Number(entradas)});
+      }
+
+      if(imported.length===0){showMsg("extrato-msg","Nenhuma entrada encontrada no arquivo.","err");return;}
+      const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
+      const news=imported.filter(e=>!existingIds.has(e.extId));
+      STATE.bank=[...news,...STATE.bank];
+      saveToFirebase();
+      showMsg("extrato-msg",`✅ ${news.length} entradas importadas! (${imported.length-news.length} duplicatas ignoradas)`,"ok");
+      renderExtrato();
+    }catch(err){
+      showMsg("extrato-msg","Erro ao ler XLSX: "+err.message,"err");
+    }
+    input.value="";
+  };
+  reader.readAsArrayBuffer(file);
 };
 
 window.deleteBank=function(id){
