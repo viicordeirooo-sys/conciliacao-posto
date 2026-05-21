@@ -419,15 +419,17 @@ function saveToFirebase(){
 }
 
 onSnapshot(doc(db,"conciliacao",DOC_ID),(snap)=>{
-  if(snap.exists()&&snap.metadata.hasPendingWrites===false){
-    const d=snap.data();
-    if(d.sales)STATE.sales=d.sales;
-    if(d.bank)STATE.bank=d.bank;
-    if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
-    if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
-    renderCurrentTab();
-  }
-});
+  try{
+    if(snap.exists()&&snap.metadata.hasPendingWrites===false){
+      const d=snap.data();
+      if(d.sales)STATE.sales=d.sales;
+      if(d.bank)STATE.bank=d.bank;
+      if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
+      if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+      if(document.getElementById("app").style.display!=="none") renderCurrentTab();
+    }
+  }catch(e){ console.log("snapshot render error",e); }
+},(err)=>{ console.log("snapshot error",err); });
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 window.doLogin=function(){
@@ -435,7 +437,9 @@ window.doLogin=function(){
   if(v===SENHA){
     document.getElementById("login-screen").style.display="none";
     document.getElementById("app").style.display="block";
-    loadFromFirebase().then(()=>{ renderCurrentTab(); });
+    loadFromFirebase()
+      .then(()=>{ try{ renderCurrentTab(); }catch(e){ console.log("render error",e); } })
+      .catch(e=>{ console.log("firebase error",e); try{ renderCurrentTab(); }catch(e2){} });
   }else{
     document.getElementById("login-error").textContent="Senha incorreta.";
     setTimeout(()=>document.getElementById("login-error").textContent="",2000);
@@ -621,7 +625,18 @@ function renderVendas(){
           📄 Importar PDF PagBank
           <input type="file" accept=".pdf" style="display:none" onchange="importPDF(this)">
         </label>
+        <label class="btn btn-dark" style="cursor:pointer;font-size:11px">
+          🔍 Debug PDF
+          <input type="file" accept=".pdf" style="display:none" onchange="runDebugPDF(this)">
+        </label>
         <span id="venda-msg"></span>
+      </div>
+      <div id="pdf-debug" style="display:none;margin-top:12px;background:#060e1a;border:1px solid #1e3450;border-radius:8px;padding:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:11px;color:#4a7a9b">Texto extraido pelo PDF.js:</span>
+          <button id="copy-debug-btn" style="background:none;border:1px solid #4a7a9b;color:#4a7a9b;border-radius:5px;padding:2px 8px;font-size:10px;cursor:pointer">Copiar</button>
+        </div>
+        <textarea id="pdf-debug-text" style="width:100%;height:180px;background:transparent;border:none;color:#7dd3fc;font-family:monospace;font-size:10px;resize:vertical;outline:none;box-sizing:border-box" readonly></textarea>
       </div>
     </div>
     <div class="card">
@@ -705,109 +720,171 @@ window.importPDF=function(input){
 };
 
 function parsePagBankPDF(text){
-  // PDF.js extracts columns separately — use index-based matching
-  // Collect all dates, all tipos, all R$ values independently then zip by index
-
   function mapTipo(tipo){
     const t=(tipo||"").toLowerCase();
-    let bandeira="Outro", modality="Débito";
-    if(t.includes("mastercard"))bandeira="Mastercard";
-    else if(t.includes("visa"))bandeira="Visa";
-    else if(t.includes("elo"))bandeira="Elo";
-    else if(t.includes("hipercard"))bandeira="Hipercard";
-    else if(t.includes("amex")||t.includes("american"))bandeira="Amex";
-    if(t.includes("pix")){bandeira="Pix";modality="Pix";}
-    else if(t.includes("débito")||t.includes("debito"))modality="Débito";
-    else if(t.includes("crédito")||t.includes("credito")){
-      if(/[2-6]x/i.test(t))modality="Crédito 2–6x";
-      else if(/([7-9]|1[0-2])x/i.test(t))modality="Crédito 7–12x";
-      else modality="Crédito À Vista";
+    var bandeira="Outro", modality="Debito";
+    if(t.indexOf("mastercard")>=0)bandeira="Mastercard";
+    else if(t.indexOf("visa")>=0)bandeira="Visa";
+    else if(t.indexOf("elo")>=0)bandeira="Elo";
+    else if(t.indexOf("hipercard")>=0)bandeira="Hipercard";
+    else if(t.indexOf("amex")>=0||t.indexOf("american")>=0)bandeira="Amex";
+    if(t.indexOf("pix")>=0){bandeira="Pix";modality="Pix";}
+    else if(t.indexOf("bito")>=0)modality="Debito";
+    else if(t.indexOf("dito")>=0||t.indexOf("credito")>=0){
+      if(t.indexOf("2x")>=0||t.indexOf("3x")>=0||t.indexOf("4x")>=0||t.indexOf("5x")>=0||t.indexOf("6x")>=0)modality="Credito26x";
+      else if(t.indexOf("7x")>=0||t.indexOf("8x")>=0||t.indexOf("9x")>=0||t.indexOf("10x")>=0||t.indexOf("11x")>=0||t.indexOf("12x")>=0)modality="Credito712x";
+      else modality="CreditoVista";
     }
-    else if(t.includes("voucher"))modality="Voucher (VR/VA)";
-    return{bandeira,modality};
+    else if(t.indexOf("voucher")>=0)modality="Voucher";
+    // Map back to system modalities
+    var modalMap={"Debito":"Débito","CreditoVista":"Crédito À Vista","Credito26x":"Crédito 2–6x","Credito712x":"Crédito 7–12x","Voucher":"Voucher (VR/VA)","Pix":"Pix"};
+    return{bandeira:bandeira,modality:modalMap[modality]||"Débito"};
   }
 
-  // 1) Collect all dates (dd/mm/yyyy) in order of appearance
-  const dateRe=/(\d{2}\/\d{2}\/\d{4})/g;
-  const allDates=[];
-  let m;
+  // Collect all dates dd/mm/yyyy
+  var dateRe=/(\d{2}\/\d{2}\/\d{4})/g;
+  var allDates=[], m;
   while((m=dateRe.exec(text))!==null) allDates.push(m[1]);
-  // Remove header dates / duplicates of same date that aren't transactions
-  // Filter: keep dates that appear to be transaction dates (ignore period header)
 
-  // 2) Collect all tipo strings in order
-  const tipoRe=/((?:Débito|Débito|Debito|Crédito|Credito|Pix|Voucher)\s+(?:Mastercard|Visa|Elo|Hipercard|Amex|American Express)?(?:\s+(?:à Vista|a Vista|pré pago|[0-9]+x))?)/gi;
-  const allTipos=[];
-  while((m=tipoRe.exec(text))!==null){
-    const t=m[1].trim();
-    if(t.length>2) allTipos.push(t);
+  // Collect all tipo keywords (ASCII only approach - search for known words)
+  var allTipos=[];
+  var tipoWords=["Debito","Debito","Credito","Pix","Voucher","Mastercard","Visa","Elo","Hipercard","Amex"];
+  // Split text into words and look for transaction type patterns
+  var words=text.split(/\s+/);
+  var i=0;
+  while(i<words.length){
+    var w=words[i];
+    var wl=w.toLowerCase().replace(/[^a-z]/g,"");
+    if(wl==="debito"||wl==="debito"||wl.indexOf("bito")>=0||wl.indexOf("dito")>=0||wl==="pix"){
+      var tipo=w;
+    // Grab next word if it is a bandeira
+      if(i+1<words.length){
+        var next=words[i+1].toLowerCase().replace(/[^a-z]/g,"");
+        if(next==="mastercard"||next==="visa"||next==="elo"||next==="hipercard"||next==="amex") tipo=tipo+" "+words[i+1];
+      }
+      allTipos.push(tipo);
+    }
+    i++;
   }
 
-  // 3) Collect all R$ values in order
-  const valRe=/R\$\s*([\d.]+,\d{2})/g;
-  const allVals=[];
+  // Collect all R$ values
+  var valRe=/R\$\s*([\d.]+,\d{2})/g;
+  var allVals=[];
   while((m=valRe.exec(text))!==null){
-    const v=parseFloat(m[1].replace(/\./g,'').replace(',','.'));
-    if(!isNaN(v)) allVals.push(v);
+    var v=parseFloat(m[1].replace(/\./g,"").replace(",","."));
+    if(!isNaN(v)&&v>0) allVals.push(v);
   }
 
-  // 4) Each transaction has 3 values: bruto, taxa, liquido
-  // Number of transactions = allVals.length / 3
-  const nTx=Math.floor(allVals.length/3);
-  if(nTx===0){
-    // Fallback: try extrato-style parsing (net values only from description)
+  var nTx=Math.floor(allVals.length/3);
+  var sales=[];
+
+  if(nTx>0){
+    // Use date[0] for all (same day report) or cycle through dates
+    // The header has 2 dates (period start/end), transactions start after
+    var txDates=allDates.slice(2); // skip header period dates
+    for(var j=0;j<nTx;j++){
+      var bruto=allVals[j*3];
+      var dateStr=txDates[j]||txDates[0]||allDates[0]||"";
+      var tipo=allTipos[j]||"";
+      if(!dateStr||!bruto) continue;
+      var mt=mapTipo(tipo);
+      var parts=dateStr.split("/");
+      var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
+      var extId="pb_"+isoDate+"_"+j+"_"+bruto;
+      sales.push({id:uid(),extId:extId,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto});
+    }
+  }
+
+  if(sales.length===0){
     return parsePagBankFallback(text);
-  }
-
-  const sales=[];
-  for(let i=0;i<nTx;i++){
-    const bruto=allVals[i*3];
-    const dateStr=allDates[i]||allDates[0]||"";
-    const tipo=allTipos[i]||"";
-    if(!dateStr||!bruto) continue;
-    const{bandeira,modality}=mapTipo(tipo);
-    const[d,mo,y]=dateStr.split('/');
-    const isoDate=`${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')}`;
-    const extId=`pb_${isoDate}_${i}_${bruto}`;
-    sales.push({id:uid(),extId,date:isoDate,bandeira,modality,amount:bruto});
   }
   return sales;
 }
 
 function parsePagBankFallback(text){
-  // If no R$ values found, parse from description lines like extrato
-  const sales=[];
-  const lines=text.split('\n');
-  const dateRe=/(\d{2}\/\d{2}\/\d{4})/;
-  lines.forEach(line=>{
-    const dm=dateRe.exec(line);
+  var sales=[];
+  var lines=text.split("\n");
+  var dateRe=/(\d{2}\/\d{2}\/\d{4})/;
+  lines.forEach(function(line){
+    var dm=dateRe.exec(line);
     if(!dm) return;
-    const dateStr=dm[1];
-    // Look for tipo
-    const tipoM=/(Débito|Crédito|Pix|Voucher)\s*(Mastercard|Visa|Elo|Hipercard|Amex)?/i.exec(line);
-    if(!tipoM) return;
-    const tipo=tipoM[0];
-    const valM=/R\$\s*([\d.]+,\d{2})/.exec(line);
+    var dateStr=dm[1];
+    var ll=line.toLowerCase();
+    var bandeira="Outro",modality="Débito";
+    if(ll.indexOf("mastercard")>=0)bandeira="Mastercard";
+    else if(ll.indexOf("visa")>=0)bandeira="Visa";
+    else if(ll.indexOf("elo")>=0)bandeira="Elo";
+    if(ll.indexOf("pix")>=0){bandeira="Pix";modality="Pix";}
+    else if(ll.indexOf("dito")>=0)modality="Crédito À Vista";
+    var valM=/R\$\s*([\d.]+,\d{2})/.exec(line);
     if(!valM) return;
-    const bruto=parseFloat(valM[1].replace(/\./g,'').replace(',','.'));
+    var bruto=parseFloat(valM[1].replace(/\./g,"").replace(",","."));
     if(!bruto) return;
-    const t=tipo.toLowerCase();
-    let bandeira="Outro",modality="Débito";
-    if(t.includes("mastercard"))bandeira="Mastercard";
-    else if(t.includes("visa"))bandeira="Visa";
-    else if(t.includes("elo"))bandeira="Elo";
-    if(t.includes("pix")){bandeira="Pix";modality="Pix";}
-    else if(t.includes("crédito")||t.includes("credito"))modality="Crédito À Vista";
-    const[d,mo,y]=dateStr.split('/');
-    const isoDate=`${y}-${mo}-${d}`;
-    sales.push({id:uid(),extId:`pbf_${isoDate}_${bruto}_${Math.random()}`,date:isoDate,bandeira,modality,amount:bruto});
+    var parts=dateStr.split("/");
+    var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
+    sales.push({id:uid(),extId:"pbf_"+isoDate+"_"+bruto+"_"+Math.random(),date:isoDate,bandeira:bandeira,modality:modality,amount:bruto});
   });
   return sales;
 }
 
 window.deleteSale=function(id){
-  STATE.sales=STATE.sales.filter(s=>s.id!==id);
+  STATE.sales=STATE.sales.filter(function(s){return s.id!==id;});
   saveToFirebase();renderVendas();
+};
+
+window.runDebugPDF=function(input){
+  var file=input.files[0];
+  if(!file) return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    var loadPdfJs=function(){
+      return new Promise(function(res,rej){
+        if(window.pdfjsLib){res();return;}
+        var s=document.createElement("script");
+        s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+        s.onload=function(){
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+          res();
+        };
+        s.onerror=rej;
+        document.head.appendChild(s);
+      });
+    };
+    loadPdfJs().then(function(){
+      return pdfjsLib.getDocument({data:e.target.result}).promise;
+    }).then(function(pdf){
+      var pages=Math.min(2,pdf.numPages);
+      var results=[];
+      var getPage=function(i){
+        if(i>pages){
+          var box=document.getElementById("pdf-debug");
+          var ta=document.getElementById("pdf-debug-text");
+          var btn=document.getElementById("copy-debug-btn");
+          if(box) box.style.display="block";
+          if(ta) ta.value=results.join("\n").slice(0,3000);
+          if(btn) btn.onclick=function(){
+            var t=document.getElementById("pdf-debug-text");
+            if(t) navigator.clipboard.writeText(t.value).then(function(){alert("Copiado!");});
+          };
+          return;
+        }
+        pdf.getPage(i).then(function(page){
+          return page.getTextContent();
+        }).then(function(content){
+          results.push("=== PAG "+i+" ===");
+          content.items.forEach(function(item,idx){
+            if(item.str && item.str.trim()) results.push("["+idx+"] "+item.str);
+          });
+          getPage(i+1);
+        });
+      };
+      getPage(1);
+    }).catch(function(err){
+      alert("Erro PDF: "+err.message);
+    });
+    input.value="";
+  };
+  reader.readAsArrayBuffer(file);
 };
 
 window.clearSales=function(){
