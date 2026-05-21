@@ -726,8 +726,6 @@ window.importPDF=function(input){
 };
 
 function parsePagBankPDF(text){
-  // Debug revealed pattern: items come as [idx] value lines
-  // Per transaction: [N] R$bruto, [N+2] R$taxa, [N+4] R$liq, [N+5] date, [N+7] Pagbank, [N+9] Tipo
   var items=[];
   var lines=text.split("\n");
   lines.forEach(function(line){
@@ -735,23 +733,24 @@ function parsePagBankPDF(text){
     if(m) items.push({idx:parseInt(m[1]),val:m[2].trim()});
   });
 
-  var vals={};
-  items.forEach(function(item){
+  // Build lookups by index
+  var vals={};    // R$ values
+  var dates={};   // date strings dd/mm/yyyy
+  var tipos={};   // tipo after Pagbank
+  var reportDate="";
+
+  items.forEach(function(item,i){
+    // R$ values
     if(item.val.indexOf("R$")===0){
       var n=parseFloat(item.val.replace("R$","").replace(/\./g,"").replace(",",".").trim());
       if(!isNaN(n)&&n>=0) vals[item.idx]=n;
     }
-  });
-
-  var dates={};
-  items.forEach(function(item){
+    // Dates: dd/mm/yyyy HH:mm
     if(/^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}$/.test(item.val)){
       dates[item.idx]=item.val.slice(0,10);
+      if(!reportDate) reportDate=item.val.slice(0,10);
     }
-  });
-
-  var tipos={};
-  items.forEach(function(item,i){
+    // Tipo: item after Pagbank
     if(item.val==="Pagbank"&&i+1<items.length){
       tipos[item.idx]=items[i+1].val;
     }
@@ -773,28 +772,39 @@ function parsePagBankPDF(text){
       else modality="CreditoVista";
     }
     else if(t.indexOf("voucher")>=0)modality="Voucher";
-    var sysMap={"Debito":"Debito","CreditoVista":"Credito Vista","Credito26x":"Credito 2-6x","Credito712x":"Credito 7-12x","Voucher":"Voucher (VR/VA)","Pix":"Pix"};
-    var nameMap={"Debito":"Debito","Credito Vista":"Credito a Vista","Credito 2-6x":"Credito 2-6x","Credito 7-12x":"Credito 7-12x","Voucher (VR/VA)":"Voucher (VR/VA)","Pix":"Pix"};
-    var finalMod=sysMap[modality]||"Debito";
-    var modNames={"Debito":"\u0044\u00e9bito","Credito Vista":"Cr\u00e9dito \u00c0 Vista","Credito 2-6x":"Cr\u00e9dito 2\u20136x","Credito 7-12x":"Cr\u00e9dito 7\u201312x","Voucher (VR/VA)":"Voucher (VR/VA)","Pix":"Pix"};
-    return{bandeira:bandeira,modality:modNames[finalMod]||"D\u00e9bito"};
+    var sysMap={"Debito":"Debito","CreditoVista":"CreditoVista","Credito26x":"Credito26x","Credito712x":"Credito712x","Voucher":"Voucher","Pix":"Pix"};
+    var nameMap={"Debito":"D\u00e9bito","CreditoVista":"Cr\u00e9dito \u00c0 Vista","Credito26x":"Cr\u00e9dito 2\u20136x","Credito712x":"Cr\u00e9dito 7\u201312x","Voucher":"Voucher (VR/VA)","Pix":"Pix"};
+    var k=sysMap[modality]||"Debito";
+    return{bandeira:bandeira,modality:nameMap[k]||"D\u00e9bito"};
   }
 
+  // Find bruto: vals[idx] where vals[idx+2] and vals[idx+4] exist
   var valIdxs=Object.keys(vals).map(Number).sort(function(a,b){return a-b;});
   var processed={};
   var sales=[];
 
   valIdxs.forEach(function(idx){
     if(processed[idx]) return;
-    var taxaIdx=idx+2,liqIdx=idx+4;
+    var taxaIdx=idx+2, liqIdx=idx+4;
     if(vals[taxaIdx]!==undefined&&vals[liqIdx]!==undefined){
       var bruto=vals[idx];
-      var dateStr=dates[idx+5]||"";
-      var pagbankIdx=idx+7;
-      var tipo=tipos[pagbankIdx]||"";
       processed[idx]=true;
       processed[taxaIdx]=true;
       processed[liqIdx]=true;
+
+      // Search for date near bruto+5 (window ±3 to handle UUID split)
+      var dateStr="";
+      for(var d=-1;d<=4;d++){
+        if(dates[idx+5+d]){dateStr=dates[idx+5+d];break;}
+      }
+      if(!dateStr) dateStr=reportDate;
+
+      // Search for tipo near bruto+7 (Pagbank index, window ±3)
+      var tipo="";
+      for(var p=-1;p<=4;p++){
+        if(tipos[idx+7+p]){tipo=tipos[idx+7+p];break;}
+      }
+
       if(!dateStr||!bruto) return;
       var parts=dateStr.split("/");
       if(parts.length!==3) return;
