@@ -700,7 +700,9 @@ window.importPDF=function(input){
       for(let i=1;i<=pdf.numPages;i++){
         const page=await pdf.getPage(i);
         const content=await page.getTextContent();
-        allText+=content.items.map(x=>x.str).join(' ')+'\n';
+        content.items.forEach(function(item,idx){
+          if(item.str&&item.str.trim()) allText+='['+idx+'] '+item.str.trim()+'\n';
+        });
       }
       const imported=parsePagBankPDF(allText);
       if(imported.length===0){showMsg("venda-msg","Nenhuma transação encontrada no PDF.","err");return;}
