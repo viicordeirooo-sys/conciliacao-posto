@@ -720,112 +720,87 @@ window.importPDF=function(input){
 };
 
 function parsePagBankPDF(text){
+  // Debug revealed pattern: items come as [idx] value lines
+  // Per transaction: [N] R$bruto, [N+2] R$taxa, [N+4] R$liq, [N+5] date, [N+7] Pagbank, [N+9] Tipo
+  var items=[];
+  var lines=text.split("\n");
+  lines.forEach(function(line){
+    var m=line.match(/^\[(\d+)\]\s+(.+)$/);
+    if(m) items.push({idx:parseInt(m[1]),val:m[2].trim()});
+  });
+
+  var vals={};
+  items.forEach(function(item){
+    if(item.val.indexOf("R$")===0){
+      var n=parseFloat(item.val.replace("R$","").replace(/\./g,"").replace(",",".").trim());
+      if(!isNaN(n)&&n>=0) vals[item.idx]=n;
+    }
+  });
+
+  var dates={};
+  items.forEach(function(item){
+    if(/^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}$/.test(item.val)){
+      dates[item.idx]=item.val.slice(0,10);
+    }
+  });
+
+  var tipos={};
+  items.forEach(function(item,i){
+    if(item.val==="Pagbank"&&i+1<items.length){
+      tipos[item.idx]=items[i+1].val;
+    }
+  });
+
   function mapTipo(tipo){
-    const t=(tipo||"").toLowerCase();
-    var bandeira="Outro", modality="Debito";
+    var t=(tipo||"").toLowerCase();
+    var bandeira="Outro",modality="Debito";
     if(t.indexOf("mastercard")>=0)bandeira="Mastercard";
     else if(t.indexOf("visa")>=0)bandeira="Visa";
     else if(t.indexOf("elo")>=0)bandeira="Elo";
     else if(t.indexOf("hipercard")>=0)bandeira="Hipercard";
-    else if(t.indexOf("amex")>=0||t.indexOf("american")>=0)bandeira="Amex";
+    else if(t.indexOf("amex")>=0)bandeira="Amex";
     if(t.indexOf("pix")>=0){bandeira="Pix";modality="Pix";}
     else if(t.indexOf("bito")>=0)modality="Debito";
-    else if(t.indexOf("dito")>=0||t.indexOf("credito")>=0){
+    else if(t.indexOf("dito")>=0){
       if(t.indexOf("2x")>=0||t.indexOf("3x")>=0||t.indexOf("4x")>=0||t.indexOf("5x")>=0||t.indexOf("6x")>=0)modality="Credito26x";
       else if(t.indexOf("7x")>=0||t.indexOf("8x")>=0||t.indexOf("9x")>=0||t.indexOf("10x")>=0||t.indexOf("11x")>=0||t.indexOf("12x")>=0)modality="Credito712x";
       else modality="CreditoVista";
     }
     else if(t.indexOf("voucher")>=0)modality="Voucher";
-    // Map back to system modalities
-    var modalMap={"Debito":"Débito","CreditoVista":"Crédito À Vista","Credito26x":"Crédito 2–6x","Credito712x":"Crédito 7–12x","Voucher":"Voucher (VR/VA)","Pix":"Pix"};
-    return{bandeira:bandeira,modality:modalMap[modality]||"Débito"};
+    var sysMap={"Debito":"Debito","CreditoVista":"Credito Vista","Credito26x":"Credito 2-6x","Credito712x":"Credito 7-12x","Voucher":"Voucher (VR/VA)","Pix":"Pix"};
+    var nameMap={"Debito":"Debito","Credito Vista":"Credito a Vista","Credito 2-6x":"Credito 2-6x","Credito 7-12x":"Credito 7-12x","Voucher (VR/VA)":"Voucher (VR/VA)","Pix":"Pix"};
+    var finalMod=sysMap[modality]||"Debito";
+    var modNames={"Debito":"\u0044\u00e9bito","Credito Vista":"Cr\u00e9dito \u00c0 Vista","Credito 2-6x":"Cr\u00e9dito 2\u20136x","Credito 7-12x":"Cr\u00e9dito 7\u201312x","Voucher (VR/VA)":"Voucher (VR/VA)","Pix":"Pix"};
+    return{bandeira:bandeira,modality:modNames[finalMod]||"D\u00e9bito"};
   }
 
-  // Collect all dates dd/mm/yyyy
-  var dateRe=/(\d{2}\/\d{2}\/\d{4})/g;
-  var allDates=[], m;
-  while((m=dateRe.exec(text))!==null) allDates.push(m[1]);
-
-  // Collect all tipo keywords (ASCII only approach - search for known words)
-  var allTipos=[];
-  var tipoWords=["Debito","Debito","Credito","Pix","Voucher","Mastercard","Visa","Elo","Hipercard","Amex"];
-  // Split text into words and look for transaction type patterns
-  var words=text.split(/\s+/);
-  var i=0;
-  while(i<words.length){
-    var w=words[i];
-    var wl=w.toLowerCase().replace(/[^a-z]/g,"");
-    if(wl==="debito"||wl==="debito"||wl.indexOf("bito")>=0||wl.indexOf("dito")>=0||wl==="pix"){
-      var tipo=w;
-    // Grab next word if it is a bandeira
-      if(i+1<words.length){
-        var next=words[i+1].toLowerCase().replace(/[^a-z]/g,"");
-        if(next==="mastercard"||next==="visa"||next==="elo"||next==="hipercard"||next==="amex") tipo=tipo+" "+words[i+1];
-      }
-      allTipos.push(tipo);
-    }
-    i++;
-  }
-
-  // Collect all R$ values
-  var valRe=/R\$\s*([\d.]+,\d{2})/g;
-  var allVals=[];
-  while((m=valRe.exec(text))!==null){
-    var v=parseFloat(m[1].replace(/\./g,"").replace(",","."));
-    if(!isNaN(v)&&v>0) allVals.push(v);
-  }
-
-  var nTx=Math.floor(allVals.length/3);
+  var valIdxs=Object.keys(vals).map(Number).sort(function(a,b){return a-b;});
+  var processed={};
   var sales=[];
 
-  if(nTx>0){
-    // Use date[0] for all (same day report) or cycle through dates
-    // The header has 2 dates (period start/end), transactions start after
-    var txDates=allDates.slice(2); // skip header period dates
-    for(var j=0;j<nTx;j++){
-      var bruto=allVals[j*3];
-      var dateStr=txDates[j]||txDates[0]||allDates[0]||"";
-      var tipo=allTipos[j]||"";
-      if(!dateStr||!bruto) continue;
-      var mt=mapTipo(tipo);
+  valIdxs.forEach(function(idx){
+    if(processed[idx]) return;
+    var taxaIdx=idx+2,liqIdx=idx+4;
+    if(vals[taxaIdx]!==undefined&&vals[liqIdx]!==undefined){
+      var bruto=vals[idx];
+      var dateStr=dates[idx+5]||"";
+      var pagbankIdx=idx+7;
+      var tipo=tipos[pagbankIdx]||"";
+      processed[idx]=true;
+      processed[taxaIdx]=true;
+      processed[liqIdx]=true;
+      if(!dateStr||!bruto) return;
       var parts=dateStr.split("/");
+      if(parts.length!==3) return;
       var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
-      var extId="pb_"+isoDate+"_"+j+"_"+bruto;
-      sales.push({id:uid(),extId:extId,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto});
+      var mt=mapTipo(tipo);
+      sales.push({id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto});
     }
-  }
-
-  if(sales.length===0){
-    return parsePagBankFallback(text);
-  }
-  return sales;
-}
-
-function parsePagBankFallback(text){
-  var sales=[];
-  var lines=text.split("\n");
-  var dateRe=/(\d{2}\/\d{2}\/\d{4})/;
-  lines.forEach(function(line){
-    var dm=dateRe.exec(line);
-    if(!dm) return;
-    var dateStr=dm[1];
-    var ll=line.toLowerCase();
-    var bandeira="Outro",modality="Débito";
-    if(ll.indexOf("mastercard")>=0)bandeira="Mastercard";
-    else if(ll.indexOf("visa")>=0)bandeira="Visa";
-    else if(ll.indexOf("elo")>=0)bandeira="Elo";
-    if(ll.indexOf("pix")>=0){bandeira="Pix";modality="Pix";}
-    else if(ll.indexOf("dito")>=0)modality="Crédito À Vista";
-    var valM=/R\$\s*([\d.]+,\d{2})/.exec(line);
-    if(!valM) return;
-    var bruto=parseFloat(valM[1].replace(/\./g,"").replace(",","."));
-    if(!bruto) return;
-    var parts=dateStr.split("/");
-    var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
-    sales.push({id:uid(),extId:"pbf_"+isoDate+"_"+bruto+"_"+Math.random(),date:isoDate,bandeira:bandeira,modality:modality,amount:bruto});
   });
+
   return sales;
 }
+
 
 window.deleteSale=function(id){
   STATE.sales=STATE.sales.filter(function(s){return s.id!==id;});
