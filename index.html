@@ -697,11 +697,15 @@ window.importPDF=function(input){
       }
       const pdf=await pdfjsLib.getDocument({data:e.target.result}).promise;
       let allText='';
+      let globalIdx=0;
       for(let i=1;i<=pdf.numPages;i++){
         const page=await pdf.getPage(i);
         const content=await page.getTextContent();
-        content.items.forEach(function(item,idx){
-          if(item.str&&item.str.trim()) allText+='['+idx+'] '+item.str.trim()+'\n';
+        content.items.forEach(function(item){
+          if(item.str&&item.str.trim()){
+            allText+='['+globalIdx+'] '+item.str.trim()+'\n';
+            globalIdx++;
+          }
         });
       }
       const imported=parsePagBankPDF(allText);
