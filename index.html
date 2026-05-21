@@ -705,50 +705,103 @@ window.importPDF=function(input){
 };
 
 function parsePagBankPDF(text){
-  const sales=[];
-  // Pattern: date time, tipo transação, bandeira, bruto, taxa, liquido
-  // "19/05/2026 23:47 Pagbank Débito Mastercard ... R$ 20,00 R$ 0,10 R$ 19,90"
-  const lines=text.split('\n');
-  const dateRe=/(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})/;
-  const valRe=/R\$\s*([\d.,]+)/g;
+  // PDF.js extracts columns separately — use index-based matching
+  // Collect all dates, all tipos, all R$ values independently then zip by index
 
-  // Map tipo from PDF to system modality+bandeira
   function mapTipo(tipo){
-    const t=tipo.toLowerCase();
+    const t=(tipo||"").toLowerCase();
     let bandeira="Outro", modality="Débito";
     if(t.includes("mastercard"))bandeira="Mastercard";
     else if(t.includes("visa"))bandeira="Visa";
     else if(t.includes("elo"))bandeira="Elo";
     else if(t.includes("hipercard"))bandeira="Hipercard";
     else if(t.includes("amex")||t.includes("american"))bandeira="Amex";
-    else if(t.includes("pix")){bandeira="Pix";modality="Pix";}
-
-    if(t.includes("débito")||t.includes("debito"))modality="Débito";
+    if(t.includes("pix")){bandeira="Pix";modality="Pix";}
+    else if(t.includes("débito")||t.includes("debito"))modality="Débito";
     else if(t.includes("crédito")||t.includes("credito")){
-      if(t.includes("2x")||t.includes("3x")||t.includes("4x")||t.includes("5x")||t.includes("6x"))modality="Crédito 2–6x";
-      else if(t.includes("7x")||t.includes("8x")||t.includes("9x")||t.includes("10x")||t.includes("11x")||t.includes("12x"))modality="Crédito 7–12x";
+      if(/[2-6]x/i.test(t))modality="Crédito 2–6x";
+      else if(/([7-9]|1[0-2])x/i.test(t))modality="Crédito 7–12x";
       else modality="Crédito À Vista";
     }
-    else if(t.includes("voucher")||t.includes("vr")||t.includes("va"))modality="Voucher (VR/VA)";
-    else if(t.includes("pix"))modality="Pix";
+    else if(t.includes("voucher"))modality="Voucher (VR/VA)";
     return{bandeira,modality};
   }
 
-  // Find transactions: look for date+time pattern followed by values
-  const combined=text.replace(/\s+/g,' ');
-  const txRe=/(\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}\s+Pagbank\s+([\w\sàáâãéêíóôõúç]+?)\s+(?:Aprovad[ao])\s+R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)/gi;
+  // 1) Collect all dates (dd/mm/yyyy) in order of appearance
+  const dateRe=/(\d{2}\/\d{2}\/\d{4})/g;
+  const allDates=[];
   let m;
-  while((m=txRe.exec(combined))!==null){
-    const dateStr=m[1]; // dd/mm/yyyy
-    const tipo=m[2].trim();
-    const bruto=parseFloat(m[3].replace('.','').replace(',','.'));
-    // m[4]=taxa, m[5]=liquido — we use bruto as the sale amount (system recalculates MDR)
+  while((m=dateRe.exec(text))!==null) allDates.push(m[1]);
+  // Remove header dates / duplicates of same date that aren't transactions
+  // Filter: keep dates that appear to be transaction dates (ignore period header)
+
+  // 2) Collect all tipo strings in order
+  const tipoRe=/((?:Débito|Débito|Debito|Crédito|Credito|Pix|Voucher)\s+(?:Mastercard|Visa|Elo|Hipercard|Amex|American Express)?(?:\s+(?:à Vista|a Vista|pré pago|[0-9]+x))?)/gi;
+  const allTipos=[];
+  while((m=tipoRe.exec(text))!==null){
+    const t=m[1].trim();
+    if(t.length>2) allTipos.push(t);
+  }
+
+  // 3) Collect all R$ values in order
+  const valRe=/R\$\s*([\d.]+,\d{2})/g;
+  const allVals=[];
+  while((m=valRe.exec(text))!==null){
+    const v=parseFloat(m[1].replace(/\./g,'').replace(',','.'));
+    if(!isNaN(v)) allVals.push(v);
+  }
+
+  // 4) Each transaction has 3 values: bruto, taxa, liquido
+  // Number of transactions = allVals.length / 3
+  const nTx=Math.floor(allVals.length/3);
+  if(nTx===0){
+    // Fallback: try extrato-style parsing (net values only from description)
+    return parsePagBankFallback(text);
+  }
+
+  const sales=[];
+  for(let i=0;i<nTx;i++){
+    const bruto=allVals[i*3];
+    const dateStr=allDates[i]||allDates[0]||"";
+    const tipo=allTipos[i]||"";
+    if(!dateStr||!bruto) continue;
     const{bandeira,modality}=mapTipo(tipo);
     const[d,mo,y]=dateStr.split('/');
-    const isoDate=`${y}-${mo}-${d}`;
-    const extId=`pb_${dateStr}_${tipo}_${bruto}`.replace(/\s/g,'_');
+    const isoDate=`${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')}`;
+    const extId=`pb_${isoDate}_${i}_${bruto}`;
     sales.push({id:uid(),extId,date:isoDate,bandeira,modality,amount:bruto});
   }
+  return sales;
+}
+
+function parsePagBankFallback(text){
+  // If no R$ values found, parse from description lines like extrato
+  const sales=[];
+  const lines=text.split('\n');
+  const dateRe=/(\d{2}\/\d{2}\/\d{4})/;
+  lines.forEach(line=>{
+    const dm=dateRe.exec(line);
+    if(!dm) return;
+    const dateStr=dm[1];
+    // Look for tipo
+    const tipoM=/(Débito|Crédito|Pix|Voucher)\s*(Mastercard|Visa|Elo|Hipercard|Amex)?/i.exec(line);
+    if(!tipoM) return;
+    const tipo=tipoM[0];
+    const valM=/R\$\s*([\d.]+,\d{2})/.exec(line);
+    if(!valM) return;
+    const bruto=parseFloat(valM[1].replace(/\./g,'').replace(',','.'));
+    if(!bruto) return;
+    const t=tipo.toLowerCase();
+    let bandeira="Outro",modality="Débito";
+    if(t.includes("mastercard"))bandeira="Mastercard";
+    else if(t.includes("visa"))bandeira="Visa";
+    else if(t.includes("elo"))bandeira="Elo";
+    if(t.includes("pix")){bandeira="Pix";modality="Pix";}
+    else if(t.includes("crédito")||t.includes("credito"))modality="Crédito À Vista";
+    const[d,mo,y]=dateStr.split('/');
+    const isoDate=`${y}-${mo}-${d}`;
+    sales.push({id:uid(),extId:`pbf_${isoDate}_${bruto}_${Math.random()}`,date:isoDate,bandeira,modality,amount:bruto});
+  });
   return sales;
 }
 
