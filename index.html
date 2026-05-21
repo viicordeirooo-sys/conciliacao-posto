@@ -704,8 +704,8 @@ window.importPDF=function(input){
         content.items.forEach(function(item){
           if(item.str&&item.str.trim()){
             allText+='['+globalIdx+'] '+item.str.trim()+'\n';
-            globalIdx++;
           }
+          globalIdx++; // always increment to preserve PDF item spacing
         });
       }
       const imported=parsePagBankPDF(allText);
