@@ -186,6 +186,7 @@ tr:hover td{background:#0a1628}
     <div class="login-logo">⛽ <span>Conciliação</span> · Posto</div>
     <div class="login-title">Acesso ao sistema</div>
     <div class="login-sub">Digite a senha para continuar</div>
+    <input class="login-input" type="email" id="login-email" placeholder="email@exemplo.com" style="margin-bottom:10px;letter-spacing:0" onkeydown="if(event.key==='Enter')doLogin()"/>
     <input class="login-input" type="password" id="login-input" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"/>
     <button class="login-btn" onclick="doLogin()">Entrar</button>
     <div class="login-error" id="login-error"></div>
@@ -288,7 +289,6 @@ const auth = getAuth(fbApp);
 //    }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const AUTH_EMAIL = "admin@conciliacao-posto.com";
 const DOC_ID = "posto1";
 
 const MAX_LOGIN_ATTEMPTS = 5;
@@ -491,6 +491,7 @@ onAuthStateChanged(auth,async(user)=>{
     clearLoginState();
     document.getElementById("login-screen").style.display="none";
     document.getElementById("app").style.display="block";
+    document.getElementById("login-email").value="";
     document.getElementById("login-input").value="";
     document.getElementById("login-error").textContent="";
     await loadFromFirebase().catch(()=>{});
@@ -533,10 +534,11 @@ window.doLogin=async function(){
     errEl.textContent=`Muitas tentativas. Aguarde ${Math.ceil(lockedMs/60000)} min.`;
     return;
   }
+  const email=document.getElementById("login-email").value.trim();
   const password=document.getElementById("login-input").value;
-  if(!password){ errEl.textContent="Digite a senha."; return; }
+  if(!email||!password){ errEl.textContent="Preencha e-mail e senha."; return; }
   try{
-    await signInWithEmailAndPassword(auth,AUTH_EMAIL,password);
+    await signInWithEmailAndPassword(auth,email,password);
   }catch(e){
     console.error("[Login] Firebase error:", e.code, e.message);
     // Erros de configuração/infraestrutura — não contam como tentativa falha
