@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline' https://www.gstatic.com https://cdnjs.cloudflare.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://*.googleapis.com wss://*.firebaseio.com; img-src 'self' data:; frame-src 'none'; object-src 'none'; base-uri 'self'"/>
 <title>Conciliação — Posto</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 
@@ -257,6 +258,7 @@ tr:hover td{background:#0a1628}
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDEX0JBCidS4yEfvgnT-rKW6se-g8_t5qM",
@@ -269,10 +271,30 @@ const firebaseConfig = {
 
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
+const auth = getAuth(fbApp);
+
+// ─── Segurança: Pré-requisitos Firebase ──────────────────────────────────────
+// 1. Firebase Console → Authentication → Sign-in method → E-mail/senha → Ativar
+// 2. Firebase Console → Authentication → Users → Adicionar usuário:
+//    E-mail: admin@conciliacao-posto.com | Senha: (defina uma senha forte)
+// 3. Firebase Console → Firestore Database → Rules → Publicar:
+//    rules_version = '2';
+//    service cloud.firestore {
+//      match /databases/{database}/documents {
+//        match /{document=**} {
+//          allow read, write: if request.auth != null;
+//        }
+//      }
+//    }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const SENHA = "Piazentin";
+const AUTH_EMAIL = "admin@conciliacao-posto.com";
 const DOC_ID = "posto1";
+
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000;
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 const DEFAULT_HOLIDAYS = [
   "2025-01-01","2025-03-03","2025-03-04","2025-04-18","2025-04-19",
@@ -329,6 +351,49 @@ function uid(){ return Math.random().toString(36).slice(2,10); }
 function monthKey(s){ return s?.slice(0,7); }
 function monthLabel(k){ if(!k)return ""; const[y,m]=k.split("-"); const n=["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]; return `${n[+m-1]}/${y}`; }
 function pct(v){ return (v||0).toFixed(2)+"%" }
+
+function escHtml(s){
+  return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+function getLoginState(){
+  return{
+    attempts:parseInt(localStorage.getItem('_la')||'0'),
+    lockuntil:parseInt(localStorage.getItem('_ll')||'0'),
+  };
+}
+function recordLoginFailure(){
+  const s=getLoginState();
+  const attempts=s.attempts+1;
+  localStorage.setItem('_la',attempts);
+  if(attempts>=MAX_LOGIN_ATTEMPTS){
+    localStorage.setItem('_ll',Date.now()+LOCKOUT_MS);
+    localStorage.setItem('_la','0');
+  }
+}
+function clearLoginState(){
+  localStorage.removeItem('_la');
+  localStorage.removeItem('_ll');
+}
+function getLockedOutMs(){
+  const s=getLoginState();
+  if(!s.lockuntil) return 0;
+  const remaining=s.lockuntil-Date.now();
+  if(remaining<=0){clearLoginState();return 0;}
+  return remaining;
+}
+
+// ─── Session timeout ──────────────────────────────────────────────────────────
+let sessionTimer=null;
+function resetSessionTimer(){
+  clearTimeout(sessionTimer);
+  sessionTimer=setTimeout(()=>{ signOut(auth); },SESSION_TIMEOUT_MS);
+}
+function clearSessionTimer(){
+  clearTimeout(sessionTimer);
+  sessionTimer=null;
+}
 
 function addBusinessDays(dateStr,n,holidays){
   if(n===0)return dateStr;
@@ -418,38 +483,79 @@ function saveToFirebase(){
   },800);
 }
 
-onSnapshot(doc(db,"conciliacao",DOC_ID),(snap)=>{
-  try{
-    if(snap.exists()&&snap.metadata.hasPendingWrites===false){
-      const d=snap.data();
-      if(d.sales)STATE.sales=d.sales;
-      if(d.bank)STATE.bank=d.bank;
-      if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
-      if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
-      if(document.getElementById("app").style.display!=="none") renderCurrentTab();
-    }
-  }catch(e){ console.log("snapshot render error",e); }
-},(err)=>{ console.log("snapshot error",err); });
+// ─── Auth state ───────────────────────────────────────────────────────────────
+let unsubscribeSnapshot=null;
 
-// ─── Login ────────────────────────────────────────────────────────────────────
-window.doLogin=function(){
-  const v=document.getElementById("login-input").value;
-  if(v===SENHA){
+onAuthStateChanged(auth,async(user)=>{
+  if(user){
+    clearLoginState();
     document.getElementById("login-screen").style.display="none";
     document.getElementById("app").style.display="block";
-    loadFromFirebase()
-      .then(()=>{ try{ renderCurrentTab(); }catch(e){ console.log("render error",e); } })
-      .catch(e=>{ console.log("firebase error",e); try{ renderCurrentTab(); }catch(e2){} });
+    document.getElementById("login-input").value="";
+    document.getElementById("login-error").textContent="";
+    await loadFromFirebase().catch(()=>{});
+    try{ renderCurrentTab(); }catch(e){}
+    unsubscribeSnapshot=onSnapshot(
+      doc(db,"conciliacao",DOC_ID),
+      (snap)=>{
+        try{
+          if(snap.exists()&&snap.metadata.hasPendingWrites===false){
+            const d=snap.data();
+            if(d.sales)STATE.sales=d.sales;
+            if(d.bank)STATE.bank=d.bank;
+            if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
+            if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+            if(document.getElementById("app").style.display!=="none") renderCurrentTab();
+          }
+        }catch(e){ console.log("snapshot render error",e); }
+      },
+      (err)=>{ console.log("snapshot error",err); }
+    );
+    resetSessionTimer();
+    ['mousemove','click','keydown','scroll','touchstart'].forEach(ev=>{
+      document.addEventListener(ev,resetSessionTimer,{passive:true});
+    });
   }else{
-    document.getElementById("login-error").textContent="Senha incorreta.";
-    setTimeout(()=>document.getElementById("login-error").textContent="",2000);
+    document.getElementById("app").style.display="none";
+    document.getElementById("login-screen").style.display="flex";
+    if(unsubscribeSnapshot){ unsubscribeSnapshot(); unsubscribeSnapshot=null; }
+    clearSessionTimer();
+    STATE={sales:[],bank:[],mdr:DEFAULT_MDR,config:DEFAULT_CONFIG};
+    filterStatus="todos"; filterMonth=""; resumoMonth=""; mdrBandeira="Visa";
+  }
+});
+
+// ─── Login ────────────────────────────────────────────────────────────────────
+window.doLogin=async function(){
+  const errEl=document.getElementById("login-error");
+  const lockedMs=getLockedOutMs();
+  if(lockedMs>0){
+    errEl.textContent=`Muitas tentativas. Aguarde ${Math.ceil(lockedMs/60000)} min.`;
+    return;
+  }
+  const password=document.getElementById("login-input").value;
+  if(!password){ errEl.textContent="Digite a senha."; return; }
+  try{
+    await signInWithEmailAndPassword(auth,AUTH_EMAIL,password);
+  }catch(e){
+    if(e.code==="auth/network-request-failed"){
+      errEl.textContent="Erro de conexão. Verifique sua internet.";
+      return;
+    }
+    recordLoginFailure();
+    const lockedAfter=getLockedOutMs();
+    if(lockedAfter>0){
+      errEl.textContent=`Bloqueado por ${Math.ceil(lockedAfter/60000)} min após muitas tentativas.`;
+    }else{
+      const remaining=MAX_LOGIN_ATTEMPTS-getLoginState().attempts;
+      errEl.textContent=`Senha incorreta. ${remaining} tentativa(s) restante(s).`;
+    }
+    setTimeout(()=>{ if(errEl)errEl.textContent=""; },4000);
   }
 };
 
-window.doLogout=function(){
-  document.getElementById("app").style.display="none";
-  document.getElementById("login-screen").style.display="flex";
-  document.getElementById("login-input").value="";
+window.doLogout=async function(){
+  await signOut(auth);
 };
 
 // ─── Tabs ─────────────────────────────────────────────────────────────────────
@@ -505,7 +611,7 @@ function renderConciliacao(){
 
   const rows=filtered.map((r,i)=>{
     const dates=[...new Set(r.sales.map(s=>fmtDate(s.date)))].join(", ");
-    const bands=Object.entries(r.bandeiras).map(([b,v])=>`<span style="background:#0a1628;border:1px solid var(--border);border-radius:10px;padding:1px 7px;font-size:10px;color:var(--muted);margin:1px;display:inline-block">${b}: ${fmtBRL(v)}</span>`).join("");
+    const bands=Object.entries(r.bandeiras).map(([b,v])=>`<span style="background:#0a1628;border:1px solid var(--border);border-radius:10px;padding:1px 7px;font-size:10px;color:var(--muted);margin:1px;display:inline-block">${escHtml(b)}: ${fmtBRL(v)}</span>`).join("");
     const badge=getBadge(r.status);
     const diffStr=["a_vencer","em_aberto","atrasado"].includes(r.status)?"—":(r.diff>=0?"+":"")+fmtBRL(r.diff);
     const diffColor=Math.abs(r.diff)<.01?"var(--muted)":r.diff>0?"var(--accent)":"var(--red)";
@@ -598,8 +704,8 @@ function renderVendas(){
     const isFer=STATE.config.holidays.includes(s.date);
     return `<tr>
       <td>${fmtDate(s.date)}${isFds?`<span class="tag tag-fds">FDS</span>`:""}${isFer?`<span class="tag tag-fer">Fer.</span>`:""}</td>
-      <td>${s.bandeira}</td>
-      <td>${s.modality}</td>
+      <td>${escHtml(s.bandeira)}</td>
+      <td>${escHtml(s.modality)}</td>
       <td style="color:var(--purple)">${fmtBRL(s.bruto)}</td>
       <td style="color:var(--red);font-size:11px">${pct(s.taxa*100)}</td>
       <td style="color:var(--red);font-size:11px">${fmtBRL(s.custoMDR)}</td>
@@ -671,6 +777,10 @@ window.addSale=function(){
   if(!vForm.date||!vForm.bandeira||!vForm.modality||!vForm.amount||Number(vForm.amount)<=0){
     showMsg("venda-msg","Preencha todos os campos.","err");return;
   }
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(vForm.date)){showMsg("venda-msg","Data inválida.","err");return;}
+  if(!BANDEIRAS.includes(vForm.bandeira)){showMsg("venda-msg","Bandeira inválida.","err");return;}
+  if(!MODALITIES.find(m=>m.name===vForm.modality)){showMsg("venda-msg","Modalidade inválida.","err");return;}
+  if(Number(vForm.amount)>9999999){showMsg("venda-msg","Valor inválido.","err");return;}
   STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount)});
   vForm={...vForm,amount:""};
   saveToFirebase();
@@ -681,6 +791,14 @@ window.addSale=function(){
 // PDF importer for PagBank sales report
 window.importPDF=function(input){
   const file=input.files[0]; if(!file) return;
+  if(file.type&&file.type!=="application/pdf"){
+    showMsg("venda-msg","Arquivo inválido. Selecione um PDF.","err");
+    input.value=""; return;
+  }
+  if(file.size>MAX_FILE_SIZE){
+    showMsg("venda-msg","Arquivo muito grande (máx. 10 MB).","err");
+    input.value=""; return;
+  }
   showMsg("venda-msg","⏳ Lendo PDF...","ok");
   const reader=new FileReader();
   reader.onload=async function(e){
@@ -889,7 +1007,7 @@ function renderExtrato(){
   const totalDia=STATE.bank.filter(e=>e.date===eForm.date).reduce((a,e)=>a+Number(e.amount),0);
   const rows=STATE.bank.map(e=>`<tr>
     <td>${fmtDate(e.date)}</td>
-    <td style="color:var(--muted)">${e.description||"—"}</td>
+    <td style="color:var(--muted)">${escHtml(e.description)||"—"}</td>
     <td style="color:var(--blue);font-weight:600">${fmtBRL(Number(e.amount))}</td>
     <td><button class="btn-sm" onclick="deleteBank('${e.id}')">✕</button></td>
   </tr>`).join("");
@@ -934,7 +1052,10 @@ function renderExtrato(){
 
 window.addBank=function(){
   if(!eForm.date||!eForm.amount||Number(eForm.amount)<=0){showMsg("extrato-msg","Preencha data e valor.","err");return;}
-  STATE.bank.unshift({...eForm,id:uid(),amount:Number(eForm.amount)});
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(eForm.date)){showMsg("extrato-msg","Data inválida.","err");return;}
+  if(Number(eForm.amount)>9999999){showMsg("extrato-msg","Valor inválido.","err");return;}
+  const desc=String(eForm.description||"").trim().slice(0,200);
+  STATE.bank.unshift({...eForm,id:uid(),amount:Number(eForm.amount),description:desc});
   eForm={...eForm,description:"",amount:""};
   saveToFirebase();showMsg("extrato-msg","✅ Adicionado!","ok");renderExtrato();
 };
@@ -942,6 +1063,15 @@ window.addBank=function(){
 // XLSX importer for PagBank bank statement
 window.importXLSX=function(input){
   const file=input.files[0]; if(!file) return;
+  const validXlsxTypes=["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.ms-excel"];
+  if(file.type&&!validXlsxTypes.includes(file.type)&&!file.name.toLowerCase().match(/\.(xlsx|xls)$/)){
+    showMsg("extrato-msg","Arquivo inválido. Selecione um XLSX.","err");
+    input.value=""; return;
+  }
+  if(file.size>MAX_FILE_SIZE){
+    showMsg("extrato-msg","Arquivo muito grande (máx. 10 MB).","err");
+    input.value=""; return;
+  }
   showMsg("extrato-msg","⏳ Lendo XLSX...","ok");
   const reader=new FileReader();
   reader.onload=async function(e){
@@ -1137,7 +1267,7 @@ function renderConfig(){
         <div class="sec-title">Identificação</div>
         <div style="margin-bottom:14px">
           <label class="lbl">Nome do Posto</label>
-          <input type="text" value="${STATE.config.postoName}" onchange="STATE.config.postoName=this.value;saveToFirebase();document.getElementById('posto-name-header').textContent=this.value">
+          <input type="text" value="${escHtml(STATE.config.postoName)}" onchange="STATE.config.postoName=this.value.trim().slice(0,100);saveToFirebase();document.getElementById('posto-name-header').textContent=this.value.trim().slice(0,100)">
         </div>
         <div>
           <label class="lbl">Tolerância de divergência (R$)</label>
@@ -1173,7 +1303,7 @@ window.setMdrBandeira=function(b){mdrBandeira=b;renderConfig();}
 
 window.addHoliday=function(){
   const v=document.getElementById("new-hol").value;
-  if(!v||STATE.config.holidays.includes(v))return;
+  if(!v||!/^\d{4}-\d{2}-\d{2}$/.test(v)||STATE.config.holidays.includes(v))return;
   STATE.config.holidays=[...STATE.config.holidays,v].sort();
   saveToFirebase();showMsg("hol-msg","✅ Adicionado!","ok");renderConfig();
 };
@@ -1198,10 +1328,21 @@ window.openImport=function(){
 };
 
 window.doImport=function(){
+  const msgEl=document.getElementById("import-msg");
+  function importErr(msg){ msgEl.innerHTML=""; const s=document.createElement("span"); s.className="msg-err"; s.textContent=msg; msgEl.appendChild(s); }
   try{
     const d=JSON.parse(document.getElementById("import-text").value);
-    if(d.sales)STATE.sales=d.sales;
-    if(d.bank)STATE.bank=d.bank;
+    if(typeof d!=="object"||d===null||Array.isArray(d)) throw new Error("formato inválido");
+    if(d.sales!==undefined){
+      if(!Array.isArray(d.sales)) throw new Error("campo sales inválido");
+      if(d.sales.length>50000) throw new Error("muitos registros");
+      STATE.sales=d.sales;
+    }
+    if(d.bank!==undefined){
+      if(!Array.isArray(d.bank)) throw new Error("campo bank inválido");
+      if(d.bank.length>50000) throw new Error("muitos registros");
+      STATE.bank=d.bank;
+    }
     if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
     if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
     saveToFirebase();
@@ -1209,7 +1350,7 @@ window.doImport=function(){
     closeModal("import-modal");
     renderCurrentTab();
     alert("✅ Dados importados!");
-  }catch{document.getElementById("import-msg").innerHTML=`<span class="msg-err">Texto inválido.</span>`;}
+  }catch(e){ importErr("Texto inválido: "+e.message); }
 };
 
 window.closeModal=function(id){document.getElementById(id).style.display="none";};
@@ -1218,12 +1359,18 @@ window.closeModal=function(id){document.getElementById(id).style.display="none";
 function showMsg(id,text,type){
   const el=document.getElementById(id);
   if(!el)return;
-  el.innerHTML=`<span class="msg-${type}">${text}</span>`;
-  setTimeout(()=>{if(el)el.innerHTML="";},2500);
+  el.innerHTML="";
+  const span=document.createElement("span");
+  span.className="msg-"+type;
+  span.textContent=text;
+  el.appendChild(span);
+  setTimeout(()=>{ if(el)el.innerHTML=""; },2500);
 }
 
-// Render initial
-renderConciliacao();
+// Aviso HTTPS
+if(location.protocol==="http:"&&location.hostname!=="localhost"&&location.hostname!=="127.0.0.1"){
+  console.warn("[SEGURANÇA] Conexão não segura detectada. Use HTTPS para proteger suas credenciais.");
+}
 </script>
 </body>
 </html>
