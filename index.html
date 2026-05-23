@@ -538,10 +538,20 @@ window.doLogin=async function(){
   try{
     await signInWithEmailAndPassword(auth,AUTH_EMAIL,password);
   }catch(e){
-    if(e.code==="auth/network-request-failed"){
-      errEl.textContent="Erro de conexão. Verifique sua internet.";
+    console.error("[Login] Firebase error:", e.code, e.message);
+    // Erros de configuração/infraestrutura — não contam como tentativa falha
+    const configErrors={
+      "auth/operation-not-allowed":"Autenticação por e-mail não está ativada no Firebase Console.",
+      "auth/configuration-not-found":"Firebase Auth não está configurado. Verifique o console Firebase.",
+      "auth/network-request-failed":"Erro de conexão. Verifique sua internet.",
+      "auth/internal-error":"Erro interno do Firebase. Tente novamente.",
+    };
+    if(configErrors[e.code]){
+      errEl.textContent=configErrors[e.code];
+      setTimeout(()=>{ if(errEl)errEl.textContent=""; },6000);
       return;
     }
+    // Credencial inválida — conta como tentativa
     recordLoginFailure();
     const lockedAfter=getLockedOutMs();
     if(lockedAfter>0){
