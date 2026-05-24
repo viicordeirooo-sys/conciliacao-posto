@@ -222,6 +222,25 @@ tr:hover td{background:#0a1628}
   </div>
 </div>
 
+<!-- MODAL CONFIRMAR LIMPAR -->
+<div class="modal-overlay" id="confirm-modal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-header">
+      <strong style="color:var(--red)">⚠️ Ação irreversível</strong>
+      <button class="modal-close" onclick="closeConfirmModal()">✕</button>
+    </div>
+    <p id="confirm-msg" style="font-size:13px;color:var(--text);margin-bottom:16px"></p>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:8px">Digite <strong style="color:var(--red);letter-spacing:2px">LIMPAR</strong> para confirmar:</p>
+    <input type="text" id="confirm-input" placeholder="LIMPAR" autocomplete="off"
+      oninput="checkConfirmInput()"
+      onkeydown="if(event.key==='Enter')doConfirmAction()"/>
+    <div class="btn-row" style="margin-top:16px">
+      <button id="confirm-ok-btn" class="btn" style="background:var(--red);opacity:.35;cursor:not-allowed" disabled onclick="doConfirmAction()">Apagar</button>
+      <button class="btn btn-dark" onclick="closeConfirmModal()">Cancelar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL EXPORT -->
 <div class="modal-overlay" id="export-modal" style="display:none">
   <div class="modal-box">
@@ -949,8 +968,12 @@ function parsePagBankPDF(text){
 
 
 window.deleteSale=function(id){
-  STATE.sales=STATE.sales.filter(function(s){return s.id!==id;});
-  saveToFirebase();renderVendas();
+  const s=STATE.sales.find(x=>x.id===id);
+  const desc=s?`Venda de ${fmtBRL(s.amount)} em ${fmtDate(s.date)} (${escHtml(s.bandeira)})`:"esta venda";
+  confirmarLimpar(`Apagar ${desc}?`,()=>{
+    STATE.sales=STATE.sales.filter(x=>x.id!==id);
+    saveToFirebase();renderVendas();
+  });
 };
 
 window.runDebugPDF=function(input){
@@ -1009,7 +1032,9 @@ window.runDebugPDF=function(input){
 };
 
 window.clearSales=function(){
-  if(confirm("Apagar todas as vendas?")){{STATE.sales=[];saveToFirebase();renderVendas();}};
+  confirmarLimpar(`Apagar todas as ${STATE.sales.length} vendas? Esta ação não pode ser desfeita.`,()=>{
+    STATE.sales=[];saveToFirebase();renderVendas();
+  });
 };
 
 // ─── EXTRATO ──────────────────────────────────────────────────────────────────
@@ -1144,12 +1169,18 @@ window.importXLSX=function(input){
 };
 
 window.deleteBank=function(id){
-  STATE.bank=STATE.bank.filter(e=>e.id!==id);
-  saveToFirebase();renderExtrato();
+  const e=STATE.bank.find(x=>x.id===id);
+  const desc=e?`entrada de ${fmtBRL(e.amount)} em ${fmtDate(e.date)}`:"esta entrada";
+  confirmarLimpar(`Apagar ${desc}?`,()=>{
+    STATE.bank=STATE.bank.filter(x=>x.id!==id);
+    saveToFirebase();renderExtrato();
+  });
 };
 
 window.clearBank=function(){
-  if(confirm("Apagar todas as entradas?")){{STATE.bank=[];saveToFirebase();renderExtrato();}};
+  confirmarLimpar(`Apagar todas as ${STATE.bank.length} entradas do extrato? Esta ação não pode ser desfeita.`,()=>{
+    STATE.bank=[];saveToFirebase();renderExtrato();
+  });
 };
 
 // ─── RESUMO ───────────────────────────────────────────────────────────────────
@@ -1366,6 +1397,39 @@ window.doImport=function(){
 };
 
 window.closeModal=function(id){document.getElementById(id).style.display="none";};
+
+// ─── Confirmação destrutiva ───────────────────────────────────────────────────
+let _confirmCb=null;
+
+window.confirmarLimpar=function(msg,callback){
+  _confirmCb=callback;
+  document.getElementById("confirm-msg").textContent=msg;
+  const inp=document.getElementById("confirm-input");
+  inp.value="";
+  const btn=document.getElementById("confirm-ok-btn");
+  btn.disabled=true; btn.style.opacity=".35"; btn.style.cursor="not-allowed";
+  document.getElementById("confirm-modal").style.display="flex";
+  setTimeout(()=>inp.focus(),60);
+};
+
+window.checkConfirmInput=function(){
+  const ok=document.getElementById("confirm-input").value==="LIMPAR";
+  const btn=document.getElementById("confirm-ok-btn");
+  btn.disabled=!ok;
+  btn.style.opacity=ok?"1":".35";
+  btn.style.cursor=ok?"pointer":"not-allowed";
+};
+
+window.doConfirmAction=function(){
+  if(document.getElementById("confirm-input").value!=="LIMPAR") return;
+  closeConfirmModal();
+  if(_confirmCb){ _confirmCb(); _confirmCb=null; }
+};
+
+window.closeConfirmModal=function(){
+  document.getElementById("confirm-modal").style.display="none";
+  _confirmCb=null;
+};
 
 // ─── Helpers UI ───────────────────────────────────────────────────────────────
 function showMsg(id,text,type){
