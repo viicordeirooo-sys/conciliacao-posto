@@ -132,6 +132,7 @@ tr:hover td{background:#0a1628}
 .badge-late{background:#3a0020;color:#e91e8c;border:1px solid #e91e8c40}
 .badge-open{background:#2a0d0d;color:#e74c3c;border:1px solid #e74c3c40}
 .badge-due{background:#0a1e30;color:#3fa7d6;border:1px solid #3fa7d640}
+.badge-nosale{background:#1a1033;color:#9b59b6;border:1px solid #9b59b640}
 
 /* ALERTS */
 .alert-late{background:#1a0010;border:1px solid #e91e8c40;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:13px;color:#f48fb1}
@@ -169,12 +170,17 @@ tr:hover td{background:#0a1628}
 .tag{display:inline-block;font-size:9px;padding:1px 6px;border-radius:8px;margin-left:5px;font-weight:700}
 .tag-fds{background:#0c2a4a;color:var(--blue)}
 .tag-fer{background:#2a1a00;color:var(--accent)}
+.tag-real{background:#0d3320;color:var(--green)}
 
 /* RESUMO */
 .resumo-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
 @media(max-width:500px){.resumo-grid{grid-template-columns:1fr 1fr}}
 
 .sync-dot{width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block;margin-right:5px;animation:pulse 2s infinite}
+.sync-dot.saving{background:var(--accent)}
+.sync-dot.error{background:var(--red);animation:none}
+.posto-sub.error{color:#f48fb1}
+.sync-retry{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;text-decoration:underline;padding:0;margin-left:6px;font-family:var(--font)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 </style>
 </head>
@@ -200,7 +206,7 @@ tr:hover td{background:#0a1628}
       <div>
         <div class="site-name">⛽ <span>Conciliação</span></div>
         <div class="posto-name" id="posto-name-header">Posto 1</div>
-        <div class="posto-sub"><span class="sync-dot"></span>Sincronizado com Firebase</div>
+        <div class="posto-sub" id="sync-status"><span class="sync-dot" id="sync-dot"></span><span id="sync-text">Sincronizado com Firebase</span></div>
       </div>
       <button class="logout-btn" onclick="doLogout()">Sair</button>
     </div>
@@ -361,6 +367,7 @@ let filterStatus = "todos";
 let filterMonth = "";
 let mdrBandeira = "Visa";
 let saveTimeout = null;
+let _savePending = false;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function todays(){ return new Date().toISOString().slice(0,10); }
@@ -444,12 +451,23 @@ function getMDR(bandeira,modality){
 }
 
 function enrichSale(s){
-  const taxa=getMDR(s.bandeira,s.modality);
   const bruto=Number(s.amount);
-  const custoMDR=bruto*taxa;
-  const liquido=bruto-custoMDR;
   const expectedDate=calcDeposit(s.date,s.modality);
-  return {...s,taxa,custoMDR,liquido,bruto,expectedDate};
+  // Líquido real do extrato prevalece sobre o cálculo pela config (fallback).
+  const real=Number(s.liquidoReal);
+  let taxa,custoMDR,liquido,taxaSource;
+  if(s.liquidoReal!=null&&isFinite(real)&&real>=0&&real<=bruto){
+    liquido=real;
+    custoMDR=bruto-real;
+    taxa=bruto>0?custoMDR/bruto:0;
+    taxaSource="real";
+  }else{
+    taxa=getMDR(s.bandeira,s.modality);
+    custoMDR=bruto*taxa;
+    liquido=bruto-custoMDR;
+    taxaSource="config";
+  }
+  return {...s,taxa,custoMDR,liquido,bruto,expectedDate,taxaSource};
 }
 
 function getReconciliation(){
@@ -467,7 +485,7 @@ function getReconciliation(){
   });
   const bankByDate={};
   STATE.bank.forEach(e=>{bankByDate[e.date]=(bankByDate[e.date]||0)+Number(e.amount);});
-  return Object.values(groups).map(g=>{
+  const result=Object.values(groups).map(g=>{
     const actual=bankByDate[g.date]||0;
     const diff=actual-g.liquido;
     const has=bankByDate[g.date]!==undefined;
@@ -478,7 +496,15 @@ function getReconciliation(){
       status=diffDays>=2?"atrasado":"em_aberto";
     }else{status="a_vencer";}
     return {...g,actual,diff,status};
-  }).sort((a,b)=>b.date.localeCompare(a.date));
+  });
+  // Datas que existem só no banco (sem venda prevista) — antes sumiam da
+  // conciliação, embora entrassem no total. Agora viram linhas "sem_venda".
+  Object.keys(bankByDate).forEach(date=>{
+    if(groups[date])return; // já coberta por um grupo de vendas
+    const actual=bankByDate[date];
+    result.push({date,bruto:0,custoMDR:0,liquido:0,sales:[],bandeiras:{},actual,diff:actual,status:"sem_venda"});
+  });
+  return result.sort((a,b)=>b.date.localeCompare(a.date));
 }
 
 // ─── Firebase ─────────────────────────────────────────────────────────────────
@@ -494,13 +520,50 @@ async function loadFromFirebase(){
   }
 }
 
-function saveToFirebase(){
-  if(saveTimeout)clearTimeout(saveTimeout);
-  saveTimeout=setTimeout(async()=>{
+function setSyncStatus(state){
+  const dot=document.getElementById("sync-dot");
+  const txt=document.getElementById("sync-text");
+  const wrap=document.getElementById("sync-status");
+  if(!dot||!txt||!wrap)return;
+  dot.className="sync-dot";
+  wrap.className="posto-sub";
+  if(state==="saving"){
+    dot.classList.add("saving");
+    txt.textContent="Salvando…";
+  }else if(state==="error"){
+    dot.classList.add("error");
+    wrap.classList.add("error");
+    txt.innerHTML='⚠️ Falha ao salvar — dados NÃO enviados.<button class="sync-retry" onclick="retrySave()">Tentar novamente</button>';
+  }else{ // saved
+    txt.textContent="Sincronizado com Firebase";
+  }
+}
+
+async function flushSave(){
+  setSyncStatus("saving");
+  try{
     const ref=doc(db,"conciliacao",DOC_ID);
     await setDoc(ref,{sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config});
-  },800);
+    _savePending=false;
+    setSyncStatus("saved");
+  }catch(e){
+    _savePending=true;
+    console.error("[saveToFirebase] falha ao gravar:",e?.code,e?.message,e);
+    setSyncStatus("error");
+  }
 }
+
+function saveToFirebase(){
+  _savePending=true;
+  setSyncStatus("saving");
+  if(saveTimeout)clearTimeout(saveTimeout);
+  saveTimeout=setTimeout(flushSave,800);
+}
+
+window.retrySave=function(){
+  if(saveTimeout)clearTimeout(saveTimeout);
+  flushSave();
+};
 
 // ─── Auth state ───────────────────────────────────────────────────────────────
 let unsubscribeSnapshot=null;
@@ -620,6 +683,7 @@ function renderConciliacao(){
     atrasado:rec.filter(r=>r.status==="atrasado").length,
     em_aberto:rec.filter(r=>r.status==="em_aberto").length,
     a_vencer:rec.filter(r=>r.status==="a_vencer").length,
+    sem_venda:rec.filter(r=>r.status==="sem_venda").length,
     totalBruto:enriched.reduce((a,s)=>a+s.bruto,0),
     totalMDR:enriched.reduce((a,s)=>a+s.custoMDR,0),
     totalLiquido:enriched.reduce((a,s)=>a+s.liquido,0),
@@ -635,13 +699,16 @@ function renderConciliacao(){
   const alertHtml=stats.atrasado>0?`
     <div class="alert-late">🚨 <strong>${stats.atrasado} depósito${stats.atrasado>1?"s":""} em atraso</strong> — a data passou e o valor não entrou no banco. Verifique com a adquirente.</div>
   `:"";
+  const alertNoSale=stats.sem_venda>0?`
+    <div class="alert-late" style="background:#1a1033;border-color:#9b59b640;color:#c39bd3">💰 <strong>${stats.sem_venda} depósito${stats.sem_venda>1?"s":""} no banco sem venda correspondente</strong> — entrou dinheiro em data sem venda prevista. Pode faltar lançar a venda, ou a data do depósito não bateu com a prevista (confira prazos/feriados na Config).</div>
+  `:"";
 
   const monthOpts=months.map(m=>`<option value="${m}"${filterMonth===m?"selected":""}>${monthLabel(m)}</option>`).join("");
-  const statusOpts=["todos","conciliado","divergencia","atrasado","em_aberto","a_vencer"];
-  const statusLabels={"todos":"Todos","conciliado":"✅ Conciliado","divergencia":"⚠️ Divergência","atrasado":"🚨 Atrasado","em_aberto":"❌ Em Aberto","a_vencer":"⏳ A Vencer"};
+  const statusOpts=["todos","conciliado","divergencia","atrasado","em_aberto","a_vencer","sem_venda"];
+  const statusLabels={"todos":"Todos","conciliado":"✅ Conciliado","divergencia":"⚠️ Divergência","atrasado":"🚨 Atrasado","em_aberto":"❌ Em Aberto","a_vencer":"⏳ A Vencer","sem_venda":"💰 Banco s/ venda"};
 
   const rows=filtered.map((r,i)=>{
-    const dates=[...new Set(r.sales.map(s=>fmtDate(s.date)))].join(", ");
+    const dates=r.sales.length?[...new Set(r.sales.map(s=>fmtDate(s.date)))].join(", "):"—";
     const bands=Object.entries(r.bandeiras).map(([b,v])=>`<span style="background:#0a1628;border:1px solid var(--border);border-radius:10px;padding:1px 7px;font-size:10px;color:var(--muted);margin:1px;display:inline-block">${escHtml(b)}: ${fmtBRL(v)}</span>`).join("");
     const badge=getBadge(r.status);
     const diffStr=["a_vencer","em_aberto","atrasado"].includes(r.status)?"—":(r.diff>=0?"+":"")+fmtBRL(r.diff);
@@ -650,9 +717,9 @@ function renderConciliacao(){
       <td>${dates}</td>
       <td style="font-weight:700;color:${r.status==="atrasado"?"var(--pink)":r.date<=todays()?"var(--text)":"var(--blue)"}">${fmtDate(r.date)}</td>
       <td>${bands}</td>
-      <td style="color:var(--purple)">${fmtBRL(r.bruto)}</td>
-      <td style="color:var(--red);font-size:11px">${fmtBRL(r.custoMDR)}</td>
-      <td style="color:var(--green);font-weight:600">${fmtBRL(r.liquido)}</td>
+      <td style="color:var(--purple)">${r.sales.length?fmtBRL(r.bruto):"—"}</td>
+      <td style="color:var(--red);font-size:11px">${r.sales.length?fmtBRL(r.custoMDR):"—"}</td>
+      <td style="color:var(--green);font-weight:600">${r.sales.length?fmtBRL(r.liquido):"—"}</td>
       <td style="color:var(--blue);font-weight:600">${r.actual>0?fmtBRL(r.actual):"—"}</td>
       <td style="font-weight:700;color:${diffColor}">${diffStr}</td>
       <td>${badge}</td>
@@ -661,11 +728,13 @@ function renderConciliacao(){
 
   document.getElementById("tab-conciliacao").innerHTML=`
     ${alertHtml}
+    ${alertNoSale}
     <div class="stats-row">
       <div class="stat-card" style="border-color:var(--green)"><div class="stat-label">Conciliados</div><div class="stat-value" style="color:var(--green)">${stats.conciliado}</div></div>
       <div class="stat-card" style="border-color:var(--accent)"><div class="stat-label">Divergências</div><div class="stat-value" style="color:var(--accent)">${stats.divergencia}</div></div>
       <div class="stat-card" style="border-color:var(--pink)"><div class="stat-label">Atrasados</div><div class="stat-value" style="color:var(--pink)">${stats.atrasado}</div></div>
       <div class="stat-card" style="border-color:var(--blue)"><div class="stat-label">A Vencer</div><div class="stat-value" style="color:var(--blue)">${stats.a_vencer}</div></div>
+      <div class="stat-card" style="border-color:#9b59b6"><div class="stat-label">Banco s/ Venda</div><div class="stat-value" style="color:#9b59b6">${stats.sem_venda}</div></div>
       <div class="stat-card" style="border-color:var(--purple)"><div class="stat-label">Total Bruto</div><div class="stat-value" style="color:var(--purple);font-size:14px">${fmtBRL(stats.totalBruto)}</div><div class="stat-sub">MDR: ${fmtBRL(stats.totalMDR)}</div></div>
       <div class="stat-card" style="border-color:var(--green)"><div class="stat-label">Líquido Esp.</div><div class="stat-value" style="color:var(--green);font-size:14px">${fmtBRL(stats.totalLiquido)}</div><div class="stat-sub">Banco: ${fmtBRL(stats.totalBanco)}</div></div>
     </div>
@@ -698,7 +767,7 @@ window.setFilterStatus=function(s){filterStatus=s;renderConciliacao();}
 window.setFilterMonth=function(m){filterMonth=m;renderConciliacao();}
 
 function getBadge(status){
-  const map={conciliado:["badge-ok","✅ Conciliado"],divergencia:["badge-div","⚠️ Divergência"],atrasado:["badge-late","🚨 Atrasado"],em_aberto:["badge-open","❌ Em Aberto"],a_vencer:["badge-due","⏳ A Vencer"]};
+  const map={conciliado:["badge-ok","✅ Conciliado"],divergencia:["badge-div","⚠️ Divergência"],atrasado:["badge-late","🚨 Atrasado"],em_aberto:["badge-open","❌ Em Aberto"],a_vencer:["badge-due","⏳ A Vencer"],sem_venda:["badge-nosale","💰 Banco s/ venda"]};
   const[cls,label]=map[status]||["",""];
   return `<span class="badge ${cls}">${label}</span>`;
 }
@@ -738,7 +807,7 @@ function renderVendas(){
       <td>${escHtml(s.bandeira)}</td>
       <td>${escHtml(s.modality)}</td>
       <td style="color:var(--purple)">${fmtBRL(s.bruto)}</td>
-      <td style="color:var(--red);font-size:11px">${pct(s.taxa*100)}</td>
+      <td style="color:var(--red);font-size:11px">${pct(s.taxa*100)}${s.taxaSource==="real"?`<span class="tag tag-real" title="Taxa/líquido do extrato">extrato</span>`:""}</td>
       <td style="color:var(--red);font-size:11px">${fmtBRL(s.custoMDR)}</td>
       <td style="color:var(--green);font-weight:600">${fmtBRL(s.liquido)}</td>
       <td style="color:var(--accent);font-weight:700">${fmtDate(s.expectedDate)}</td>
@@ -959,7 +1028,16 @@ function parsePagBankPDF(text){
       if(parts.length!==3) return;
       var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
       var mt=mapTipo(tipo);
-      sales.push({id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto});
+      var sale={id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto};
+      // Preserva o líquido real do extrato quando a aritmética confirma que
+      // os dois valores extras são taxa+líquido. Não depende da ordem:
+      // líquido = maior, taxa = menor; valida que somam o bruto (±2 centavos).
+      var v2=vals[taxaIdx], v4=vals[liqIdx];
+      var liquidoReal=Math.max(v2,v4), taxaReal=Math.min(v2,v4);
+      if(Math.abs(bruto-(v2+v4))<=0.02 && liquidoReal>=0 && liquidoReal<=bruto){
+        sale.liquidoReal=liquidoReal;
+      }
+      sales.push(sale);
     }
   });
 
@@ -1217,7 +1295,7 @@ function renderResumo(){
     <td style="color:var(--muted);font-size:11px">${totalBruto>0?pct(v.mdr/v.bruto*100):"0.00%"}</td>
   </tr>`).join("");
 
-  const statusMap={conciliado:["var(--green)","✅ Conciliado"],divergencia:["var(--accent)","⚠️ Divergência"],atrasado:["var(--pink)","🚨 Atrasado"],em_aberto:["var(--red)","❌ Em Aberto"],a_vencer:["var(--blue)","⏳ A Vencer"]};
+  const statusMap={conciliado:["var(--green)","✅ Conciliado"],divergencia:["var(--accent)","⚠️ Divergência"],atrasado:["var(--pink)","🚨 Atrasado"],em_aberto:["var(--red)","❌ Em Aberto"],a_vencer:["var(--blue)","⏳ A Vencer"],sem_venda:["#9b59b6","💰 Banco s/ venda"]};
   const statusCards=Object.entries(statusMap).map(([k,[color,label]])=>{
     const count=rec.filter(r=>r.status===k).length;
     return `<div style="background:var(--card2);border-radius:10px;padding:12px 16px;flex:1;min-width:90px;text-align:center;border-left:3px solid ${color}">
