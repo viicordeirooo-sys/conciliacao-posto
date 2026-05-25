@@ -169,6 +169,7 @@ tr:hover td{background:#0a1628}
 .tag{display:inline-block;font-size:9px;padding:1px 6px;border-radius:8px;margin-left:5px;font-weight:700}
 .tag-fds{background:#0c2a4a;color:var(--blue)}
 .tag-fer{background:#2a1a00;color:var(--accent)}
+.tag-real{background:#0d3320;color:var(--green)}
 
 /* RESUMO */
 .resumo-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
@@ -449,12 +450,23 @@ function getMDR(bandeira,modality){
 }
 
 function enrichSale(s){
-  const taxa=getMDR(s.bandeira,s.modality);
   const bruto=Number(s.amount);
-  const custoMDR=bruto*taxa;
-  const liquido=bruto-custoMDR;
   const expectedDate=calcDeposit(s.date,s.modality);
-  return {...s,taxa,custoMDR,liquido,bruto,expectedDate};
+  // Líquido real do extrato prevalece sobre o cálculo pela config (fallback).
+  const real=Number(s.liquidoReal);
+  let taxa,custoMDR,liquido,taxaSource;
+  if(s.liquidoReal!=null&&isFinite(real)&&real>=0&&real<=bruto){
+    liquido=real;
+    custoMDR=bruto-real;
+    taxa=bruto>0?custoMDR/bruto:0;
+    taxaSource="real";
+  }else{
+    taxa=getMDR(s.bandeira,s.modality);
+    custoMDR=bruto*taxa;
+    liquido=bruto-custoMDR;
+    taxaSource="config";
+  }
+  return {...s,taxa,custoMDR,liquido,bruto,expectedDate,taxaSource};
 }
 
 function getReconciliation(){
@@ -780,7 +792,7 @@ function renderVendas(){
       <td>${escHtml(s.bandeira)}</td>
       <td>${escHtml(s.modality)}</td>
       <td style="color:var(--purple)">${fmtBRL(s.bruto)}</td>
-      <td style="color:var(--red);font-size:11px">${pct(s.taxa*100)}</td>
+      <td style="color:var(--red);font-size:11px">${pct(s.taxa*100)}${s.taxaSource==="real"?`<span class="tag tag-real" title="Taxa/líquido do extrato">extrato</span>`:""}</td>
       <td style="color:var(--red);font-size:11px">${fmtBRL(s.custoMDR)}</td>
       <td style="color:var(--green);font-weight:600">${fmtBRL(s.liquido)}</td>
       <td style="color:var(--accent);font-weight:700">${fmtDate(s.expectedDate)}</td>
@@ -1001,7 +1013,16 @@ function parsePagBankPDF(text){
       if(parts.length!==3) return;
       var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
       var mt=mapTipo(tipo);
-      sales.push({id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto});
+      var sale={id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto};
+      // Preserva o líquido real do extrato quando a aritmética confirma que
+      // os dois valores extras são taxa+líquido. Não depende da ordem:
+      // líquido = maior, taxa = menor; valida que somam o bruto (±2 centavos).
+      var v2=vals[taxaIdx], v4=vals[liqIdx];
+      var liquidoReal=Math.max(v2,v4), taxaReal=Math.min(v2,v4);
+      if(Math.abs(bruto-(v2+v4))<=0.02 && liquidoReal>=0 && liquidoReal<=bruto){
+        sale.liquidoReal=liquidoReal;
+      }
+      sales.push(sale);
     }
   });
 
