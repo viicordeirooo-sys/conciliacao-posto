@@ -175,6 +175,10 @@ tr:hover td{background:#0a1628}
 @media(max-width:500px){.resumo-grid{grid-template-columns:1fr 1fr}}
 
 .sync-dot{width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block;margin-right:5px;animation:pulse 2s infinite}
+.sync-dot.saving{background:var(--accent)}
+.sync-dot.error{background:var(--red);animation:none}
+.posto-sub.error{color:#f48fb1}
+.sync-retry{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;text-decoration:underline;padding:0;margin-left:6px;font-family:var(--font)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 </style>
 </head>
@@ -200,7 +204,7 @@ tr:hover td{background:#0a1628}
       <div>
         <div class="site-name">⛽ <span>Conciliação</span></div>
         <div class="posto-name" id="posto-name-header">Posto 1</div>
-        <div class="posto-sub"><span class="sync-dot"></span>Sincronizado com Firebase</div>
+        <div class="posto-sub" id="sync-status"><span class="sync-dot" id="sync-dot"></span><span id="sync-text">Sincronizado com Firebase</span></div>
       </div>
       <button class="logout-btn" onclick="doLogout()">Sair</button>
     </div>
@@ -361,6 +365,7 @@ let filterStatus = "todos";
 let filterMonth = "";
 let mdrBandeira = "Visa";
 let saveTimeout = null;
+let _savePending = false;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function todays(){ return new Date().toISOString().slice(0,10); }
@@ -494,13 +499,50 @@ async function loadFromFirebase(){
   }
 }
 
-function saveToFirebase(){
-  if(saveTimeout)clearTimeout(saveTimeout);
-  saveTimeout=setTimeout(async()=>{
+function setSyncStatus(state){
+  const dot=document.getElementById("sync-dot");
+  const txt=document.getElementById("sync-text");
+  const wrap=document.getElementById("sync-status");
+  if(!dot||!txt||!wrap)return;
+  dot.className="sync-dot";
+  wrap.className="posto-sub";
+  if(state==="saving"){
+    dot.classList.add("saving");
+    txt.textContent="Salvando…";
+  }else if(state==="error"){
+    dot.classList.add("error");
+    wrap.classList.add("error");
+    txt.innerHTML='⚠️ Falha ao salvar — dados NÃO enviados.<button class="sync-retry" onclick="retrySave()">Tentar novamente</button>';
+  }else{ // saved
+    txt.textContent="Sincronizado com Firebase";
+  }
+}
+
+async function flushSave(){
+  setSyncStatus("saving");
+  try{
     const ref=doc(db,"conciliacao",DOC_ID);
     await setDoc(ref,{sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config});
-  },800);
+    _savePending=false;
+    setSyncStatus("saved");
+  }catch(e){
+    _savePending=true;
+    console.error("[saveToFirebase] falha ao gravar:",e?.code,e?.message,e);
+    setSyncStatus("error");
+  }
 }
+
+function saveToFirebase(){
+  _savePending=true;
+  setSyncStatus("saving");
+  if(saveTimeout)clearTimeout(saveTimeout);
+  saveTimeout=setTimeout(flushSave,800);
+}
+
+window.retrySave=function(){
+  if(saveTimeout)clearTimeout(saveTimeout);
+  flushSave();
+};
 
 // ─── Auth state ───────────────────────────────────────────────────────────────
 let unsubscribeSnapshot=null;
