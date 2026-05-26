@@ -353,7 +353,9 @@ const DEFAULT_CONFIG = {
   liquidation:Object.fromEntries(MODALITIES.map(m=>[m.name,m.d])),
   corridos:Object.fromEntries(MODALITIES.map(m=>[m.name,m.corridos])),
   holidays:DEFAULT_HOLIDAYS,
-  tolerance:2,
+  // Folga só p/ arredondamento da adquirente. Antes era R$2 (mascarava
+  // divergência real de até R$2 por grupo). Config já salva prevalece no merge.
+  tolerance:0.05,
 };
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -1438,8 +1440,8 @@ function renderConfig(){
         </div>
         <div>
           <label class="lbl">Tolerância de divergência (R$)</label>
-          <input type="number" min="0" style="width:100px" value="${STATE.config.tolerance}" onchange="STATE.config.tolerance=Number(this.value);saveToFirebase()">
-          <div style="font-size:11px;color:var(--muted);margin-top:4px">Diferenças menores → ✅ OK</div>
+          <input type="number" min="0" step="0.01" style="width:100px" value="${STATE.config.tolerance}" onchange="STATE.config.tolerance=Number(this.value);saveToFirebase()">
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Folga só p/ arredondamento. Diferenças até esse valor → ✅ Conciliado. Valores altos <strong>escondem</strong> divergência real (recomendado: R$ 0,05).</div>
         </div>
       </div>
       <div class="card">
