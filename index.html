@@ -358,6 +358,12 @@ const DEFAULT_CONFIG = {
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let STATE = {sales:[],bank:[],mdr:DEFAULT_MDR,config:DEFAULT_CONFIG};
+// Handlers inline (on*=) rodam em escopo global e não enxergam variáveis do
+// módulo. STATE e saveToFirebase são usados direto nos handlers da aba Config,
+// então precisam estar em window. STATE é só MUTADO (nunca reatribuído) para
+// o alias permanecer válido. As demais interações (Vendas/Extrato/Resumo) vão
+// por funções setter window.* (setVForm/setEForm/setResumoMonth).
+window.STATE = STATE;
 let currentTab = "conciliacao";
 let filterStatus = "todos";
 let filterMonth = "";
@@ -647,7 +653,8 @@ onAuthStateChanged(auth,async(user)=>{
     document.getElementById("login-screen").style.display="flex";
     if(unsubscribeSnapshot){ unsubscribeSnapshot(); unsubscribeSnapshot=null; }
     clearSessionTimer();
-    STATE={sales:[],bank:[],mdr:DEFAULT_MDR,config:DEFAULT_CONFIG};
+    // Muta em vez de reatribuir: preserva a identidade do objeto p/ window.STATE.
+    STATE.sales=[]; STATE.bank=[]; STATE.mdr=DEFAULT_MDR; STATE.config=DEFAULT_CONFIG;
     filterStatus="todos"; filterMonth=""; resumoMonth=""; mdrBandeira="Visa";
   }
 });
@@ -819,14 +826,13 @@ function getBadge(status){
 // ─── VENDAS ───────────────────────────────────────────────────────────────────
 let vForm={date:todays(),bandeira:"Visa",modality:"Débito",amount:""};
 
-function renderVendas(){
-  const enriched=STATE.sales.map(enrichSale);
+// Preview do lançamento manual. Isolado em função p/ poder atualizar só o
+// container (#venda-preview) ao digitar o valor, sem re-renderizar a aba toda
+// (que faria o input perder o foco a cada tecla).
+function vendaPreviewHtml(){
   const preview=calcPreview();
-
-  const modOpts=MODALITIES.map(m=>`<option value="${m.name}"${vForm.modality===m.name?"selected":""}>${m.name}</option>`).join("");
-  const bandOpts=BANDEIRAS.map(b=>`<option value="${b}"${vForm.bandeira===b?"selected":""}>${b}</option>`).join("");
-
-  const prevHtml=vForm.amount&&Number(vForm.amount)>0?`
+  if(!(vForm.amount&&Number(vForm.amount)>0)) return "";
+  return `
     <div class="preview-box">
       <div class="preview-row">
         <span class="preview-item">Bruto: <strong style="color:var(--purple)">${fmtBRL(preview.bruto)}</strong></span>
@@ -840,7 +846,26 @@ function renderVendas(){
         ${!preview.isCorridos&&preview.isFds?`<span class="tag tag-fds">FDS→SEG</span>`:""}
         ${!preview.isCorridos&&preview.isFer?`<span class="tag tag-fer">FERIADO</span>`:""}
       </div>
-    </div>`:"";
+    </div>`;
+}
+window.updateVendaPreview=function(){
+  const el=document.getElementById("venda-preview");
+  if(el) el.innerHTML=vendaPreviewHtml();
+};
+
+// Setters expostos p/ os handlers inline (escopo global não vê vars do módulo).
+window.saveToFirebase=saveToFirebase;
+window.setVForm=function(field,value){ vForm[field]=value; renderVendas(); };          // date/bandeira/modalidade
+window.setVAmount=function(value){ vForm.amount=value; updateVendaPreview(); };          // valor: só preview, mantém foco
+window.setEForm=function(field,value){ eForm[field]=value; renderExtrato(); };           // data do crédito
+window.setEFormField=function(field,value){ eForm[field]=value; };                       // descrição/valor: sem re-render
+window.setResumoMonth=function(value){ resumoMonth=value; renderResumo(); };
+
+function renderVendas(){
+  const enriched=STATE.sales.map(enrichSale);
+
+  const modOpts=MODALITIES.map(m=>`<option value="${m.name}"${vForm.modality===m.name?"selected":""}>${m.name}</option>`).join("");
+  const bandOpts=BANDEIRAS.map(b=>`<option value="${b}"${vForm.bandeira===b?"selected":""}>${b}</option>`).join("");
 
   const rows=enriched.map(s=>{
     const dow=new Date(s.date+"T12:00:00").getDay();
@@ -863,12 +888,12 @@ function renderVendas(){
     <div class="card">
       <div class="sec-title">Lançar Venda</div>
       <div class="form-grid form-grid-4">
-        <div><label class="lbl">Data da Venda</label><input type="date" value="${vForm.date}" onchange="vForm.date=this.value;renderVendas()"></div>
-        <div><label class="lbl">Bandeira</label><select onchange="vForm.bandeira=this.value;renderVendas()">${bandOpts}</select></div>
-        <div><label class="lbl">Modalidade</label><select onchange="vForm.modality=this.value;renderVendas()">${modOpts}</select></div>
-        <div><label class="lbl">Valor Bruto (R$)</label><input type="number" step="0.01" min="0" placeholder="0,00" value="${vForm.amount}" oninput="vForm.amount=this.value;renderVendas()" onkeydown="if(event.key==='Enter')addSale()"></div>
+        <div><label class="lbl">Data da Venda</label><input type="date" value="${vForm.date}" onchange="setVForm('date',this.value)"></div>
+        <div><label class="lbl">Bandeira</label><select onchange="setVForm('bandeira',this.value)">${bandOpts}</select></div>
+        <div><label class="lbl">Modalidade</label><select onchange="setVForm('modality',this.value)">${modOpts}</select></div>
+        <div><label class="lbl">Valor Bruto (R$)</label><input type="number" step="0.01" min="0" placeholder="0,00" value="${vForm.amount}" oninput="setVAmount(this.value)" onkeydown="if(event.key==='Enter')addSale()"></div>
       </div>
-      ${prevHtml}
+      <div id="venda-preview">${vendaPreviewHtml()}</div>
       <div class="btn-row">
         <button class="btn" onclick="addSale()">+ Adicionar</button>
         <label class="btn btn-dark" style="cursor:pointer">
@@ -926,7 +951,7 @@ window.addSale=function(){
   if(!MODALITIES.find(m=>m.name===vForm.modality)){showMsg("venda-msg","Modalidade inválida.","err");return;}
   if(Number(vForm.amount)>9999999){showMsg("venda-msg","Valor inválido.","err");return;}
   STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount)});
-  vForm={...vForm,amount:""};
+  vForm.amount="";  // muta (não reatribui) p/ manter o alias window.vForm
   saveToFirebase();
   showMsg("venda-msg","✅ Adicionado!","ok");
   renderVendas();
@@ -1179,9 +1204,9 @@ function renderExtrato(){
       </div>
       <div class="sec-title">Lançar Entrada do Banco</div>
       <div class="form-grid form-grid-3">
-        <div><label class="lbl">Data do Crédito</label><input type="date" value="${eForm.date}" onchange="eForm.date=this.value;renderExtrato()"></div>
-        <div><label class="lbl">Descrição</label><input type="text" placeholder="ex: CIELO DEBITO 16/05" value="${eForm.description}" oninput="eForm.description=this.value"></div>
-        <div><label class="lbl">Valor Líquido (R$)</label><input type="number" step="0.01" min="0" placeholder="0,00" value="${eForm.amount}" oninput="eForm.amount=this.value" onkeydown="if(event.key==='Enter')addBank()"></div>
+        <div><label class="lbl">Data do Crédito</label><input type="date" value="${eForm.date}" onchange="setEForm('date',this.value)"></div>
+        <div><label class="lbl">Descrição</label><input type="text" placeholder="ex: CIELO DEBITO 16/05" value="${eForm.description}" oninput="setEFormField('description',this.value)"></div>
+        <div><label class="lbl">Valor Líquido (R$)</label><input type="number" step="0.01" min="0" placeholder="0,00" value="${eForm.amount}" oninput="setEFormField('amount',this.value)" onkeydown="if(event.key==='Enter')addBank()"></div>
       </div>
       ${totalDia>0?`<div style="font-size:12px;color:var(--muted);margin-top:8px">Total em ${fmtDate(eForm.date)}: <strong style="color:var(--blue)">${fmtBRL(totalDia)}</strong></div>`:""}
       <div class="btn-row">
@@ -1215,7 +1240,7 @@ window.addBank=function(){
   if(Number(eForm.amount)>9999999){showMsg("extrato-msg","Valor inválido.","err");return;}
   const desc=String(eForm.description||"").trim().slice(0,200);
   STATE.bank.unshift({...eForm,id:uid(),amount:Number(eForm.amount),description:desc});
-  eForm={...eForm,description:"",amount:""};
+  eForm.description=""; eForm.amount="";  // muta (não reatribui) p/ manter o alias window.eForm
   saveToFirebase();showMsg("extrato-msg","✅ Adicionado!","ok");renderExtrato();
 };
 
@@ -1354,7 +1379,7 @@ function renderResumo(){
     <div class="card" style="padding:12px 16px;margin-bottom:14px">
       <div style="display:flex;gap:10px;align-items:center">
         <span class="sec-title" style="margin:0">Mês:</span>
-        <select style="width:130px" onchange="resumoMonth=this.value;renderResumo()">
+        <select style="width:130px" onchange="setResumoMonth(this.value)">
           ${months.length===0?`<option>Sem dados</option>`:""}${monthOpts}
         </select>
       </div>
