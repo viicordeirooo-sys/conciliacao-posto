@@ -178,6 +178,7 @@ tr:hover td{background:#0a1628}
 
 .sync-dot{width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block;margin-right:5px;animation:pulse 2s infinite}
 .sync-dot.saving{background:var(--accent)}
+.sync-dot.warn{background:var(--accent);animation:none}
 .sync-dot.error{background:var(--red);animation:none}
 .posto-sub.error{color:#f48fb1}
 .sync-retry{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;text-decoration:underline;padding:0;margin-left:6px;font-family:var(--font)}
@@ -313,6 +314,7 @@ const MAX_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const DOC_SIZE_WARN = 800 * 1024; // ~80% do limite de 1 MB do doc no Firestore
 
 const DEFAULT_HOLIDAYS = [
   "2025-01-01","2025-03-03","2025-03-04","2025-04-18","2025-04-19",
@@ -414,6 +416,34 @@ function escHtml(s){
   return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// ─── Validação de import JSON ───────────────────────────────────────────────────
+function isPlainObject(o){ return o!=null && typeof o==="object" && !Array.isArray(o); }
+const _DATE_RE=/^\d{4}-\d{2}-\d{2}$/;
+// Normaliza/valida uma venda do JSON importado. Lança no 1º problema (fail-fast).
+function normSale(s,i){
+  if(!isPlainObject(s)) throw new Error(`venda #${i+1}: registro inválido`);
+  if(!_DATE_RE.test(s.date)) throw new Error(`venda #${i+1}: data inválida (use AAAA-MM-DD)`);
+  const amount=Number(s.amount);
+  if(!Number.isFinite(amount)||amount<=0||amount>9999999) throw new Error(`venda #${i+1}: valor inválido`);
+  if(!BANDEIRAS.includes(s.bandeira)) throw new Error(`venda #${i+1}: bandeira "${s.bandeira}" desconhecida`);
+  if(!MODALITIES.some(m=>m.name===s.modality)) throw new Error(`venda #${i+1}: modalidade "${s.modality}" desconhecida`);
+  const out={id:(typeof s.id==="string"&&s.id)?s.id:uid(),date:s.date,bandeira:s.bandeira,modality:s.modality,amount};
+  if(s.extId!=null) out.extId=String(s.extId);
+  if(s.liquidoReal!=null){ const lr=Number(s.liquidoReal); if(Number.isFinite(lr)&&lr>=0&&lr<=amount) out.liquidoReal=lr; }
+  if(typeof s.expectedDate==="string"&&_DATE_RE.test(s.expectedDate)) out.expectedDate=s.expectedDate; // preserva data congelada (round-trip de export)
+  return out;
+}
+// Normaliza/valida uma entrada bancária do JSON importado.
+function normBank(e,i){
+  if(!isPlainObject(e)) throw new Error(`entrada #${i+1}: registro inválido`);
+  if(!_DATE_RE.test(e.date)) throw new Error(`entrada #${i+1}: data inválida (use AAAA-MM-DD)`);
+  const amount=Number(e.amount);
+  if(!Number.isFinite(amount)||amount<=0||amount>9999999) throw new Error(`entrada #${i+1}: valor inválido`);
+  const out={id:(typeof e.id==="string"&&e.id)?e.id:uid(),date:e.date,amount,description:String(e.description||"").trim().slice(0,200)};
+  if(e.extId!=null) out.extId=String(e.extId);
+  return out;
+}
+
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 function getLoginState(){
   return{
@@ -484,7 +514,9 @@ function getMDR(bandeira,modality){
 
 function enrichSale(s){
   const bruto=Number(s.amount);
-  const expectedDate=calcDeposit(s.date,s.modality);
+  // Data esperada congelada no lançamento prevalece; senão calcula pela config
+  // atual (fallback p/ vendas antigas sem o campo — use "Recalcular datas" p/ congelar).
+  const expectedDate=(typeof s.expectedDate==="string"&&_DATE_RE.test(s.expectedDate))?s.expectedDate:calcDeposit(s.date,s.modality);
   // Líquido real do extrato prevalece sobre o cálculo pela config (fallback).
   const real=Number(s.liquidoReal);
   let taxa,custoMDR,liquido,taxaSource;
@@ -570,7 +602,13 @@ async function loadFromFirebase(){
   setBaseline(STATE.sales,STATE.bank);
 }
 
-function setSyncStatus(state){
+// Tamanho aproximado (bytes UTF-8) do que é gravado no doc do Firestore.
+function docSizeBytes(){
+  try{ return new TextEncoder().encode(JSON.stringify({sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config})).length; }
+  catch(e){ return 0; }
+}
+
+function setSyncStatus(state,detail){
   const dot=document.getElementById("sync-dot");
   const txt=document.getElementById("sync-text");
   const wrap=document.getElementById("sync-status");
@@ -584,6 +622,9 @@ function setSyncStatus(state){
     dot.classList.add("error");
     wrap.classList.add("error");
     txt.innerHTML='⚠️ Falha ao salvar — dados NÃO enviados.<button class="sync-retry" onclick="retrySave()">Tentar novamente</button>';
+  }else if(state==="warn"){
+    dot.classList.add("warn");
+    txt.textContent=`Sincronizado · ⚠️ base em ${detail} KB de ~1 MB — considere arquivar dados antigos`;
   }else{ // saved
     txt.textContent="Sincronizado com Firebase";
   }
@@ -613,7 +654,13 @@ async function flushSave(){
       if(document.getElementById("app").style.display!=="none") renderCurrentTab();
     }
     _savePending=false;
-    setSyncStatus("saved");
+    const bytes=docSizeBytes();
+    if(bytes>DOC_SIZE_WARN){
+      console.warn(`[saveToFirebase] base em ${Math.round(bytes/1024)} KB (limite ~1 MB por doc).`);
+      setSyncStatus("warn",Math.round(bytes/1024));
+    }else{
+      setSyncStatus("saved");
+    }
   }catch(e){
     _savePending=true;
     console.error("[saveToFirebase] falha ao gravar:",e?.code,e?.message,e);
@@ -969,7 +1016,7 @@ window.addSale=function(){
   if(!BANDEIRAS.includes(vForm.bandeira)){showMsg("venda-msg","Bandeira inválida.","err");return;}
   if(!MODALITIES.find(m=>m.name===vForm.modality)){showMsg("venda-msg","Modalidade inválida.","err");return;}
   if(Number(vForm.amount)>9999999){showMsg("venda-msg","Valor inválido.","err");return;}
-  STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount)});
+  STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount),expectedDate:calcDeposit(vForm.date,vForm.modality)});
   vForm.amount="";  // muta (não reatribui) p/ manter o alias window.vForm
   saveToFirebase();
   showMsg("venda-msg","✅ Adicionado!","ok");
@@ -1124,7 +1171,7 @@ function parsePagBankPDF(text){
       if(parts.length!==3){ skipped++; return; }
       var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
       var mt=mapTipo(tipo);
-      var sale={id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto};
+      var sale={id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto,expectedDate:calcDeposit(isoDate,mt.modality)};
       // Preserva o líquido real do extrato quando a aritmética confirma que
       // os dois valores extras são taxa+líquido. Não depende da ordem:
       // líquido = maior, taxa = menor; valida que somam o bruto (±2 centavos).
@@ -1507,6 +1554,10 @@ function renderConfig(){
       <div class="card">
         <div class="sec-title">Prazos de Liquidação</div>
         ${modRows}
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
+          <button class="btn btn-dark" style="font-size:11px" onclick="recalcExpectedDates()">🔄 Recalcular datas de depósito</button>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">Vendas guardam a data de depósito de quando foram lançadas. Use isto p/ aplicar prazos/feriados novos às vendas já existentes (pode mudar o status de conciliação).</div>
+        </div>
       </div>
     </div>
     <div class="card">
@@ -1529,6 +1580,16 @@ function renderConfig(){
 }
 
 window.setMdrBandeira=function(b){mdrBandeira=b;renderConfig();}
+
+// Recongela expectedDate de todas as vendas com a config atual (prazos/feriados).
+window.recalcExpectedDates=function(){
+  const n=STATE.sales.length;
+  if(n===0){ alert("Nenhuma venda para recalcular."); return; }
+  if(!confirm(`Recalcular a data de depósito de ${n} venda(s) com a config atual?\nIsso pode alterar o status de conciliação.`)) return;
+  STATE.sales.forEach(s=>{ s.expectedDate=calcDeposit(s.date,s.modality); });
+  saveToFirebase();
+  alert(`✅ Datas recalculadas (${n} venda(s)).`);
+};
 
 window.addHoliday=function(){
   const v=document.getElementById("new-hol").value;
@@ -1562,18 +1623,23 @@ window.doImport=function(){
   try{
     const d=JSON.parse(document.getElementById("import-text").value);
     if(typeof d!=="object"||d===null||Array.isArray(d)) throw new Error("formato inválido");
+    // Valida TUDO antes de tocar no STATE (atômico): se algo falhar, nada é aplicado.
+    let newSales,newBank;
     if(d.sales!==undefined){
       if(!Array.isArray(d.sales)) throw new Error("campo sales inválido");
       if(d.sales.length>50000) throw new Error("muitos registros");
-      STATE.sales=d.sales;
+      newSales=d.sales.map(normSale); // fail-fast: lança no 1º registro inválido
     }
     if(d.bank!==undefined){
       if(!Array.isArray(d.bank)) throw new Error("campo bank inválido");
       if(d.bank.length>50000) throw new Error("muitos registros");
-      STATE.bank=d.bank;
+      newBank=d.bank.map(normBank);
     }
-    if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
-    if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+    // Tudo validou — agora aplica.
+    if(newSales!==undefined) STATE.sales=newSales;
+    if(newBank!==undefined) STATE.bank=newBank;
+    if(isPlainObject(d.mdr))STATE.mdr={...DEFAULT_MDR,...d.mdr};
+    if(isPlainObject(d.config))STATE.config={...DEFAULT_CONFIG,...d.config};
     saveToFirebase();
     document.getElementById("import-text").value="";
     closeModal("import-modal");
