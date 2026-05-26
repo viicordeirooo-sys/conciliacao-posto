@@ -414,6 +414,33 @@ function escHtml(s){
   return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// ─── Validação de import JSON ───────────────────────────────────────────────────
+function isPlainObject(o){ return o!=null && typeof o==="object" && !Array.isArray(o); }
+const _DATE_RE=/^\d{4}-\d{2}-\d{2}$/;
+// Normaliza/valida uma venda do JSON importado. Lança no 1º problema (fail-fast).
+function normSale(s,i){
+  if(!isPlainObject(s)) throw new Error(`venda #${i+1}: registro inválido`);
+  if(!_DATE_RE.test(s.date)) throw new Error(`venda #${i+1}: data inválida (use AAAA-MM-DD)`);
+  const amount=Number(s.amount);
+  if(!Number.isFinite(amount)||amount<=0||amount>9999999) throw new Error(`venda #${i+1}: valor inválido`);
+  if(!BANDEIRAS.includes(s.bandeira)) throw new Error(`venda #${i+1}: bandeira "${s.bandeira}" desconhecida`);
+  if(!MODALITIES.some(m=>m.name===s.modality)) throw new Error(`venda #${i+1}: modalidade "${s.modality}" desconhecida`);
+  const out={id:(typeof s.id==="string"&&s.id)?s.id:uid(),date:s.date,bandeira:s.bandeira,modality:s.modality,amount};
+  if(s.extId!=null) out.extId=String(s.extId);
+  if(s.liquidoReal!=null){ const lr=Number(s.liquidoReal); if(Number.isFinite(lr)&&lr>=0&&lr<=amount) out.liquidoReal=lr; }
+  return out;
+}
+// Normaliza/valida uma entrada bancária do JSON importado.
+function normBank(e,i){
+  if(!isPlainObject(e)) throw new Error(`entrada #${i+1}: registro inválido`);
+  if(!_DATE_RE.test(e.date)) throw new Error(`entrada #${i+1}: data inválida (use AAAA-MM-DD)`);
+  const amount=Number(e.amount);
+  if(!Number.isFinite(amount)||amount<=0||amount>9999999) throw new Error(`entrada #${i+1}: valor inválido`);
+  const out={id:(typeof e.id==="string"&&e.id)?e.id:uid(),date:e.date,amount,description:String(e.description||"").trim().slice(0,200)};
+  if(e.extId!=null) out.extId=String(e.extId);
+  return out;
+}
+
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 function getLoginState(){
   return{
@@ -1562,18 +1589,23 @@ window.doImport=function(){
   try{
     const d=JSON.parse(document.getElementById("import-text").value);
     if(typeof d!=="object"||d===null||Array.isArray(d)) throw new Error("formato inválido");
+    // Valida TUDO antes de tocar no STATE (atômico): se algo falhar, nada é aplicado.
+    let newSales,newBank;
     if(d.sales!==undefined){
       if(!Array.isArray(d.sales)) throw new Error("campo sales inválido");
       if(d.sales.length>50000) throw new Error("muitos registros");
-      STATE.sales=d.sales;
+      newSales=d.sales.map(normSale); // fail-fast: lança no 1º registro inválido
     }
     if(d.bank!==undefined){
       if(!Array.isArray(d.bank)) throw new Error("campo bank inválido");
       if(d.bank.length>50000) throw new Error("muitos registros");
-      STATE.bank=d.bank;
+      newBank=d.bank.map(normBank);
     }
-    if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
-    if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+    // Tudo validou — agora aplica.
+    if(newSales!==undefined) STATE.sales=newSales;
+    if(newBank!==undefined) STATE.bank=newBank;
+    if(isPlainObject(d.mdr))STATE.mdr={...DEFAULT_MDR,...d.mdr};
+    if(isPlainObject(d.config))STATE.config={...DEFAULT_CONFIG,...d.config};
     saveToFirebase();
     document.getElementById("import-text").value="";
     closeModal("import-modal");
