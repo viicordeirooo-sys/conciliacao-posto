@@ -368,7 +368,14 @@ let _baselineBankIds = new Set();
 let _txResult = null;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-function todays(){ return new Date().toISOString().slice(0,10); }
+// Data local (fuso do dispositivo), não UTC: toISOString() viraria o dia
+// após ~21h no Brasil (UTC-3) e distorceria status atrasado/a_vencer.
+function todays(){
+  const d=new Date();
+  const m=String(d.getMonth()+1).padStart(2,"0");
+  const day=String(d.getDate()).padStart(2,"0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
 function fmtBRL(v){ return (v||0).toLocaleString("pt-BR",{style:"currency",currency:"BRL"}); }
 function fmtDate(s){ if(!s)return "—"; const[y,m,d]=s.split("-"); return `${d}/${m}/${y}`; }
 function uid(){ return Math.random().toString(36).slice(2,10); }
