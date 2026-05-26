@@ -17,7 +17,7 @@ python -m http.server 8000   # then open http://localhost:8000
 # or: npx serve
 ```
 
-`localhost` is an authorized Auth domain by default. Logging in requires an existing Firebase user (email/password) — see the setup comment block near the top of the `<script type="module">` (around line 296): Email/Password sign-in must be enabled, a user created, and Firestore rules set to `allow read, write: if request.auth != null`.
+`localhost` is an authorized Auth domain by default. Logging in requires an existing Firebase user (email/password) — see the setup comment block near the top of the `<script type="module">`: Email/Password sign-in must be enabled and a user created. Firestore rules are versioned in `firestore.rules` (with `firebase.json` and `.firebaserc`) — restrict access to the `conciliacao` collection for authenticated users, default-deny otherwise. Publish them with `firebase deploy --only firestore:rules`.
 
 To deploy, host `index.html` as a static file on any HTTPS host (the Firebase config is embedded and public by design for client SDKs).
 

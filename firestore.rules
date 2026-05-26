@@ -1,0 +1,19 @@
+rules_version = '2';
+
+// Regras do Firestore — app de conciliação de posto único.
+// Publicar com: firebase deploy --only firestore:rules
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Único dado do app: a coleção 'conciliacao' (doc 'posto1').
+    // Acesso somente para usuários autenticados (Firebase Auth e-mail/senha).
+    match /conciliacao/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Qualquer outra coleção é negada por padrão (default-deny explícito).
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
