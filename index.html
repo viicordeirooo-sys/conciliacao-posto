@@ -382,6 +382,21 @@ function todays(){
   return `${d.getFullYear()}-${m}-${day}`;
 }
 function round2(v){ return Math.round((Number(v)+Number.EPSILON)*100)/100; } // 2 casas, meio-pra-cima
+// Converte valor de planilha para número. Aceita número JS e texto pt-BR
+// ("1.234,56" → 1234.56; "1234,56" → 1234.56; "1.234.567" → 1234567).
+function parseBRLNumber(v){
+  if(typeof v==="number") return isFinite(v)?v:NaN;
+  if(v==null) return NaN;
+  let s=String(v).trim().replace(/\s/g,"").replace(/R\$/gi,"");
+  if(s==="") return NaN;
+  if(s.indexOf(",")>=0){            // vírgula = decimal (pt-BR), ponto = milhar
+    s=s.replace(/\./g,"").replace(",",".");
+  }else if(/^-?\d{1,3}(\.\d{3})+$/.test(s)){  // milhar sem decimais: 1.234.567
+    s=s.replace(/\./g,"");
+  }
+  const n=Number(s);
+  return isFinite(n)?n:NaN;
+}
 function fmtBRL(v){ return (v||0).toLocaleString("pt-BR",{style:"currency",currency:"BRL"}); }
 function fmtDate(s){ if(!s)return "—"; const[y,m,d]=s.split("-"); return `${d}/${m}/${y}`; }
 function uid(){ return Math.random().toString(36).slice(2,10); }
@@ -974,14 +989,21 @@ window.importPDF=function(input){
           globalIdx++; // always increment to preserve PDF item spacing
         });
       }
-      const imported=parsePagBankPDF(allText);
-      if(imported.length===0){showMsg("venda-msg","Nenhuma transação encontrada no PDF.","err");return;}
+      const parsed=parsePagBankPDF(allText);
+      const imported=parsed.sales;
+      const skipped=parsed.skipped;
+      if(imported.length===0){
+        showMsg("venda-msg",skipped>0?`Nenhuma transação válida. ${skipped} linha(s) ignorada(s) — use o botão Debug PDF para conferir o leiaute.`:"Nenhuma transação encontrada no PDF.","err");
+        return;
+      }
       // Deduplicate by checking existing ids
       const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
       const news=imported.filter(s=>!existingIds.has(s.extId));
       STATE.sales=[...news,...STATE.sales];
       saveToFirebase();
-      showMsg("venda-msg",`✅ ${news.length} transações importadas! (${imported.length-news.length} duplicatas ignoradas)`,"ok");
+      if(skipped>0) console.warn(`[importPDF] ${skipped} transação(ões) ignorada(s) por falta de data válida.`);
+      const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
+      showMsg("venda-msg",`✅ ${news.length} transações importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
       renderVendas();
     }catch(err){
       showMsg("venda-msg","Erro ao ler PDF: "+err.message,"err");
@@ -1048,6 +1070,7 @@ function parsePagBankPDF(text){
   var valIdxs=Object.keys(vals).map(Number).sort(function(a,b){return a-b;});
   var processed={};
   var sales=[];
+  var skipped=0; // candidatos (bruto+taxa+líquido) descartados por falta de data válida
 
   valIdxs.forEach(function(idx){
     if(processed[idx]) return;
@@ -1071,9 +1094,9 @@ function parsePagBankPDF(text){
         if(tipos[idx+7+p]){tipo=tipos[idx+7+p];break;}
       }
 
-      if(!dateStr||!bruto) return;
+      if(!dateStr||!bruto){ skipped++; return; }
       var parts=dateStr.split("/");
-      if(parts.length!==3) return;
+      if(parts.length!==3){ skipped++; return; }
       var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
       var mt=mapTipo(tipo);
       var sale={id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto};
@@ -1089,7 +1112,7 @@ function parsePagBankPDF(text){
     }
   });
 
-  return sales;
+  return {sales:sales, skipped:skipped};
 }
 
 
@@ -1254,15 +1277,22 @@ window.importXLSX=function(input){
       // Layout: col0=Data, col2=Tipo, col4=Descrição, col5=Entradas
       // Header row is index 8, data starts at 9
       const imported=[];
+      let skipped=0; // linhas que pareciam transação mas o valor/data falhou
       for(let i=9;i<rows.length;i++){
         const row=rows[i];
         const dateRaw=row[0]; // "19/05/2026" or date serial
         const tipo=String(row[2]||"").trim();
         const desc=String(row[4]||"").trim();
-        const entradas=row[5];
+        const rawVal=row[5];
 
-        if(!dateRaw||!entradas||isNaN(Number(entradas))||Number(entradas)<=0) continue;
-        if(tipo.toLowerCase().includes("saldo")) continue;
+        if(!dateRaw) continue;                              // linha vazia, ignora
+        if(tipo.toLowerCase().includes("saldo")) continue;  // linha de saldo, ignora
+
+        const entradas=parseBRLNumber(rawVal);
+        if(!Number.isFinite(entradas)||entradas<=0){
+          if(rawVal!==""&&rawVal!=null) skipped++;          // havia valor mas não parseou
+          continue;
+        }
 
         // Parse date
         let isoDate="";
@@ -1273,18 +1303,23 @@ window.importXLSX=function(input){
           // Excel serial date
           const jsDate=new Date((dateRaw-25569)*86400*1000);
           isoDate=jsDate.toISOString().slice(0,10);
-        } else continue;
+        } else { skipped++; continue; }
 
         const extId=`bk_${isoDate}_${desc}_${entradas}`.replace(/\s/g,'_');
-        imported.push({id:uid(),extId,date:isoDate,description:desc,amount:Number(entradas)});
+        imported.push({id:uid(),extId,date:isoDate,description:desc,amount:entradas});
       }
 
-      if(imported.length===0){showMsg("extrato-msg","Nenhuma entrada encontrada no arquivo.","err");return;}
+      if(imported.length===0){
+        showMsg("extrato-msg",skipped>0?`Nenhuma entrada válida. ${skipped} linha(s) ignorada(s) — confira o leiaute do arquivo.`:"Nenhuma entrada encontrada no arquivo.","err");
+        return;
+      }
       const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
       const news=imported.filter(e=>!existingIds.has(e.extId));
       STATE.bank=[...news,...STATE.bank];
       saveToFirebase();
-      showMsg("extrato-msg",`✅ ${news.length} entradas importadas! (${imported.length-news.length} duplicatas ignoradas)`,"ok");
+      if(skipped>0) console.warn(`[importXLSX] ${skipped} linha(s) ignorada(s) por valor/data não-parseável.`);
+      const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
+      showMsg("extrato-msg",`✅ ${news.length} entradas importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
       renderExtrato();
     }catch(err){
       showMsg("extrato-msg","Erro ao ler XLSX: "+err.message,"err");
