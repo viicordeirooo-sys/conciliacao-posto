@@ -1674,8 +1674,9 @@ window.checkConfirmInput=function(){
 
 window.doConfirmAction=function(){
   if(document.getElementById("confirm-input").value!=="LIMPAR") return;
+  const cb=_confirmCb;   // captura antes: closeConfirmModal() zera _confirmCb
   closeConfirmModal();
-  if(_confirmCb){ _confirmCb(); _confirmCb=null; }
+  if(cb) cb();
 };
 
 window.closeConfirmModal=function(){
