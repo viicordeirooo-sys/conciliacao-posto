@@ -1318,6 +1318,57 @@ window.addBank=function(){
   saveToFirebase();showMsg("extrato-msg","✅ Adicionado!","ok");renderExtrato();
 };
 
+// Normaliza texto de cabeçalho: minúsculas, sem acento. "Descrição" -> "descricao".
+function _normHdr(s){ return String(s==null?"":s).normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().trim(); }
+
+// Detecta a linha de cabeçalho e mapeia colunas por NOME (não por posição fixa).
+// Essenciais: Data + Entradas (sinônimos Crédito/Valor). Tipo/Descrição opcionais.
+// Retorna {headerRow,data,tipo,descricao,entradas} ou null se não reconhecer.
+function mapXlsxColumns(rows){
+  const VAL_SYN=["entradas","credito","valor"]; // prioridade: entradas > credito > valor
+  const lim=Math.min(rows.length,50);
+  for(let r=0;r<lim;r++){
+    const normd=(rows[r]||[]).map(_normHdr);
+    const data=normd.indexOf("data");
+    let entradas=-1;
+    for(const syn of VAL_SYN){ const c=normd.indexOf(syn); if(c>=0){ entradas=c; break; } }
+    if(data>=0 && entradas>=0){
+      return {headerRow:r,data,tipo:normd.indexOf("tipo"),descricao:normd.indexOf("descricao"),entradas};
+    }
+  }
+  return null;
+}
+
+// Processa as linhas de dados do extrato usando o mapa de colunas. Puro/testável.
+function parseXlsxBankRows(rows,map){
+  const imported=[]; let skipped=0;
+  for(let i=map.headerRow+1;i<rows.length;i++){
+    const row=rows[i]||[];
+    const dateRaw=row[map.data];
+    const tipo=map.tipo>=0?String(row[map.tipo]||"").trim():"";
+    const desc=map.descricao>=0?String(row[map.descricao]||"").trim():"";
+    const rawVal=row[map.entradas];
+    if(!dateRaw) continue;                              // linha vazia, ignora
+    if(tipo.toLowerCase().includes("saldo")) continue;  // linha de saldo, ignora
+    const entradas=parseBRLNumber(rawVal);
+    if(!Number.isFinite(entradas)||entradas<=0){
+      if(rawVal!==""&&rawVal!=null) skipped++;          // havia valor mas não parseou
+      continue;
+    }
+    let isoDate="";
+    if(typeof dateRaw==="string"&&dateRaw.includes("/")){
+      const[d,m,y]=dateRaw.split("/");
+      isoDate=`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+    } else if(typeof dateRaw==="number"){
+      const jsDate=new Date((dateRaw-25569)*86400*1000); // serial Excel
+      isoDate=jsDate.toISOString().slice(0,10);
+    } else { skipped++; continue; }
+    const extId=`bk_${isoDate}_${desc}_${entradas}`.replace(/\s/g,'_');
+    imported.push({id:uid(),extId,date:isoDate,description:desc,amount:entradas});
+  }
+  return {imported,skipped};
+}
+
 // XLSX importer for PagBank bank statement
 window.importXLSX=function(input){
   const file=input.files[0]; if(!file) return;
@@ -1346,40 +1397,14 @@ window.importXLSX=function(input){
       const ws=wb.Sheets[wb.SheetNames[0]];
       const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
 
-      // Layout: col0=Data, col2=Tipo, col4=Descrição, col5=Entradas
-      // Header row is index 8, data starts at 9
-      const imported=[];
-      let skipped=0; // linhas que pareciam transação mas o valor/data falhou
-      for(let i=9;i<rows.length;i++){
-        const row=rows[i];
-        const dateRaw=row[0]; // "19/05/2026" or date serial
-        const tipo=String(row[2]||"").trim();
-        const desc=String(row[4]||"").trim();
-        const rawVal=row[5];
-
-        if(!dateRaw) continue;                              // linha vazia, ignora
-        if(tipo.toLowerCase().includes("saldo")) continue;  // linha de saldo, ignora
-
-        const entradas=parseBRLNumber(rawVal);
-        if(!Number.isFinite(entradas)||entradas<=0){
-          if(rawVal!==""&&rawVal!=null) skipped++;          // havia valor mas não parseou
-          continue;
-        }
-
-        // Parse date
-        let isoDate="";
-        if(typeof dateRaw==="string"&&dateRaw.includes("/")){
-          const[d,m,y]=dateRaw.split("/");
-          isoDate=`${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
-        } else if(typeof dateRaw==="number"){
-          // Excel serial date
-          const jsDate=new Date((dateRaw-25569)*86400*1000);
-          isoDate=jsDate.toISOString().slice(0,10);
-        } else { skipped++; continue; }
-
-        const extId=`bk_${isoDate}_${desc}_${entradas}`.replace(/\s/g,'_');
-        imported.push({id:uid(),extId,date:isoDate,description:desc,amount:entradas});
+      // Detecta o cabeçalho dinamicamente e mapeia colunas por nome (leiaute do
+      // PagBank pode variar nº de linhas de metadados / posição das colunas).
+      const map=mapXlsxColumns(rows);
+      if(!map){
+        showMsg("extrato-msg",'Cabeçalho não reconhecido — esperado uma linha com "Data" e "Entradas". Confira o arquivo.',"err");
+        input.value=""; return;
       }
+      const {imported,skipped}=parseXlsxBankRows(rows,map);
 
       if(imported.length===0){
         showMsg("extrato-msg",skipped>0?`Nenhuma entrada válida. ${skipped} linha(s) ignorada(s) — confira o leiaute do arquivo.`:"Nenhuma entrada encontrada no arquivo.","err");
