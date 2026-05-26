@@ -379,6 +379,7 @@ function todays(){
   const day=String(d.getDate()).padStart(2,"0");
   return `${d.getFullYear()}-${m}-${day}`;
 }
+function round2(v){ return Math.round((Number(v)+Number.EPSILON)*100)/100; } // 2 casas, meio-pra-cima
 function fmtBRL(v){ return (v||0).toLocaleString("pt-BR",{style:"currency",currency:"BRL"}); }
 function fmtDate(s){ if(!s)return "—"; const[y,m,d]=s.split("-"); return `${d}/${m}/${y}`; }
 function uid(){ return Math.random().toString(36).slice(2,10); }
@@ -465,14 +466,15 @@ function enrichSale(s){
   const real=Number(s.liquidoReal);
   let taxa,custoMDR,liquido,taxaSource;
   if(s.liquidoReal!=null&&isFinite(real)&&real>=0&&real<=bruto){
-    liquido=real;
-    custoMDR=bruto-real;
+    liquido=real;                       // valor real do extrato (já em centavos)
+    custoMDR=round2(bruto-real);
     taxa=bruto>0?custoMDR/bruto:0;
     taxaSource="real";
   }else{
+    // Modela a adquirente: arredonda a taxa em centavos, líquido = bruto − taxa.
     taxa=getMDR(s.bandeira,s.modality);
-    custoMDR=bruto*taxa;
-    liquido=bruto-custoMDR;
+    custoMDR=round2(bruto*taxa);
+    liquido=round2(bruto-custoMDR);
     taxaSource="config";
   }
   return {...s,taxa,custoMDR,liquido,bruto,expectedDate,taxaSource};
@@ -495,7 +497,7 @@ function getReconciliation(){
   STATE.bank.forEach(e=>{bankByDate[e.date]=(bankByDate[e.date]||0)+Number(e.amount);});
   const result=Object.values(groups).map(g=>{
     const actual=bankByDate[g.date]||0;
-    const diff=actual-g.liquido;
+    const diff=round2(actual-g.liquido); // arredonda p/ remover resíduo de float da soma
     const has=bankByDate[g.date]!==undefined;
     let status;
     if(has){status=Math.abs(diff)<=STATE.config.tolerance?"conciliado":"divergencia";}
@@ -908,8 +910,8 @@ function renderVendas(){
 function calcPreview(){
   const bruto=Number(vForm.amount)||0;
   const taxa=getMDR(vForm.bandeira,vForm.modality);
-  const custoMDR=bruto*taxa;
-  const liquido=bruto-custoMDR;
+  const custoMDR=round2(bruto*taxa);     // mesmo arredondamento do enrichSale
+  const liquido=round2(bruto-custoMDR);
   const days=STATE.config.liquidation[vForm.modality]??1;
   const isCorridos=STATE.config.corridos[vForm.modality]??false;
   const dep=calcDeposit(vForm.date,vForm.modality);
