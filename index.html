@@ -430,6 +430,7 @@ function normSale(s,i){
   const out={id:(typeof s.id==="string"&&s.id)?s.id:uid(),date:s.date,bandeira:s.bandeira,modality:s.modality,amount};
   if(s.extId!=null) out.extId=String(s.extId);
   if(s.liquidoReal!=null){ const lr=Number(s.liquidoReal); if(Number.isFinite(lr)&&lr>=0&&lr<=amount) out.liquidoReal=lr; }
+  if(typeof s.expectedDate==="string"&&_DATE_RE.test(s.expectedDate)) out.expectedDate=s.expectedDate; // preserva data congelada (round-trip de export)
   return out;
 }
 // Normaliza/valida uma entrada bancária do JSON importado.
@@ -513,7 +514,9 @@ function getMDR(bandeira,modality){
 
 function enrichSale(s){
   const bruto=Number(s.amount);
-  const expectedDate=calcDeposit(s.date,s.modality);
+  // Data esperada congelada no lançamento prevalece; senão calcula pela config
+  // atual (fallback p/ vendas antigas sem o campo — use "Recalcular datas" p/ congelar).
+  const expectedDate=(typeof s.expectedDate==="string"&&_DATE_RE.test(s.expectedDate))?s.expectedDate:calcDeposit(s.date,s.modality);
   // Líquido real do extrato prevalece sobre o cálculo pela config (fallback).
   const real=Number(s.liquidoReal);
   let taxa,custoMDR,liquido,taxaSource;
@@ -1013,7 +1016,7 @@ window.addSale=function(){
   if(!BANDEIRAS.includes(vForm.bandeira)){showMsg("venda-msg","Bandeira inválida.","err");return;}
   if(!MODALITIES.find(m=>m.name===vForm.modality)){showMsg("venda-msg","Modalidade inválida.","err");return;}
   if(Number(vForm.amount)>9999999){showMsg("venda-msg","Valor inválido.","err");return;}
-  STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount)});
+  STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount),expectedDate:calcDeposit(vForm.date,vForm.modality)});
   vForm.amount="";  // muta (não reatribui) p/ manter o alias window.vForm
   saveToFirebase();
   showMsg("venda-msg","✅ Adicionado!","ok");
@@ -1168,7 +1171,7 @@ function parsePagBankPDF(text){
       if(parts.length!==3){ skipped++; return; }
       var isoDate=parts[2]+"-"+parts[1]+"-"+parts[0];
       var mt=mapTipo(tipo);
-      var sale={id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto};
+      var sale={id:uid(),extId:"pb_"+isoDate+"_"+idx+"_"+bruto,date:isoDate,bandeira:mt.bandeira,modality:mt.modality,amount:bruto,expectedDate:calcDeposit(isoDate,mt.modality)};
       // Preserva o líquido real do extrato quando a aritmética confirma que
       // os dois valores extras são taxa+líquido. Não depende da ordem:
       // líquido = maior, taxa = menor; valida que somam o bruto (±2 centavos).
@@ -1551,6 +1554,10 @@ function renderConfig(){
       <div class="card">
         <div class="sec-title">Prazos de Liquidação</div>
         ${modRows}
+        <div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">
+          <button class="btn btn-dark" style="font-size:11px" onclick="recalcExpectedDates()">🔄 Recalcular datas de depósito</button>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">Vendas guardam a data de depósito de quando foram lançadas. Use isto p/ aplicar prazos/feriados novos às vendas já existentes (pode mudar o status de conciliação).</div>
+        </div>
       </div>
     </div>
     <div class="card">
@@ -1573,6 +1580,16 @@ function renderConfig(){
 }
 
 window.setMdrBandeira=function(b){mdrBandeira=b;renderConfig();}
+
+// Recongela expectedDate de todas as vendas com a config atual (prazos/feriados).
+window.recalcExpectedDates=function(){
+  const n=STATE.sales.length;
+  if(n===0){ alert("Nenhuma venda para recalcular."); return; }
+  if(!confirm(`Recalcular a data de depósito de ${n} venda(s) com a config atual?\nIsso pode alterar o status de conciliação.`)) return;
+  STATE.sales.forEach(s=>{ s.expectedDate=calcDeposit(s.date,s.modality); });
+  saveToFirebase();
+  alert(`✅ Datas recalculadas (${n} venda(s)).`);
+};
 
 window.addHoliday=function(){
   const v=document.getElementById("new-hol").value;
