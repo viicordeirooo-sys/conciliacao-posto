@@ -283,7 +283,7 @@ tr:hover td{background:#0a1628}
 <!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
-import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+import { getFirestore, doc, onSnapshot, getDoc, runTransaction } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 
 const firebaseConfig = {
@@ -368,6 +368,11 @@ let filterMonth = "";
 let mdrBandeira = "Visa";
 let saveTimeout = null;
 let _savePending = false;
+// Baseline = último estado remoto observado (load/snapshot/save). Usado para
+// o merge 3-vias por id: deduz o que foi adicionado/removido localmente.
+let _baselineSaleIds = new Set();
+let _baselineBankIds = new Set();
+let _txResult = null;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function todays(){ return new Date().toISOString().slice(0,10); }
@@ -508,6 +513,22 @@ function getReconciliation(){
 }
 
 // ─── Firebase ─────────────────────────────────────────────────────────────────
+function setBaseline(sales,bank){
+  _baselineSaleIds=new Set((sales||[]).map(s=>s.id));
+  _baselineBankIds=new Set((bank||[]).map(b=>b.id));
+}
+
+// Merge 3-vias por id: parte do remoto, remove o que foi deletado localmente
+// (estava no baseline e sumiu do local) e aplica os itens locais (add/edit vence).
+// Garante que adds concorrentes de A e B sobrevivam e que deleções sejam respeitadas.
+function mergeListById(remoteList,localList,baselineIds){
+  const map=new Map((remoteList||[]).map(x=>[x.id,x]));
+  const localIds=new Set((localList||[]).map(x=>x.id));
+  baselineIds.forEach(id=>{ if(!localIds.has(id)) map.delete(id); });
+  (localList||[]).forEach(x=>map.set(x.id,x));
+  return [...map.values()];
+}
+
 async function loadFromFirebase(){
   const ref=doc(db,"conciliacao",DOC_ID);
   const snap=await getDoc(ref);
@@ -518,6 +539,7 @@ async function loadFromFirebase(){
     if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
     if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
   }
+  setBaseline(STATE.sales,STATE.bank);
 }
 
 function setSyncStatus(state){
@@ -543,7 +565,25 @@ async function flushSave(){
   setSyncStatus("saving");
   try{
     const ref=doc(db,"conciliacao",DOC_ID);
-    await setDoc(ref,{sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config});
+    // Transação read-modify-write: mescla o estado local sobre o remoto atual,
+    // em vez de sobrescrever o doc inteiro (evita lost-update entre usuários).
+    // mdr/config seguem last-writer-wins (não são listas; edição concorrente é rara).
+    await runTransaction(db,async(tx)=>{
+      const snap=await tx.get(ref);
+      const remote=snap.exists()?snap.data():{};
+      const mergedSales=mergeListById(remote.sales,STATE.sales,_baselineSaleIds);
+      const mergedBank=mergeListById(remote.bank,STATE.bank,_baselineBankIds);
+      tx.set(ref,{sales:mergedSales,bank:mergedBank,mdr:STATE.mdr,config:STATE.config});
+      _txResult={sales:mergedSales,bank:mergedBank};
+    });
+    // Aplica o resultado mesclado localmente (reflete adds remotos de imediato).
+    if(_txResult){
+      STATE.sales=_txResult.sales;
+      STATE.bank=_txResult.bank;
+      setBaseline(STATE.sales,STATE.bank);
+      _txResult=null;
+      if(document.getElementById("app").style.display!=="none") renderCurrentTab();
+    }
     _savePending=false;
     setSyncStatus("saved");
   }catch(e){
@@ -588,6 +628,7 @@ onAuthStateChanged(auth,async(user)=>{
             if(d.bank)STATE.bank=d.bank;
             if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
             if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+            setBaseline(STATE.sales,STATE.bank);
             if(document.getElementById("app").style.display!=="none") renderCurrentTab();
           }
         }catch(e){ console.log("snapshot render error",e); }
