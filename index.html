@@ -178,6 +178,7 @@ tr:hover td{background:#0a1628}
 
 .sync-dot{width:7px;height:7px;border-radius:50%;background:var(--green);display:inline-block;margin-right:5px;animation:pulse 2s infinite}
 .sync-dot.saving{background:var(--accent)}
+.sync-dot.warn{background:var(--accent);animation:none}
 .sync-dot.error{background:var(--red);animation:none}
 .posto-sub.error{color:#f48fb1}
 .sync-retry{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;text-decoration:underline;padding:0;margin-left:6px;font-family:var(--font)}
@@ -313,6 +314,7 @@ const MAX_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const DOC_SIZE_WARN = 800 * 1024; // ~80% do limite de 1 MB do doc no Firestore
 
 const DEFAULT_HOLIDAYS = [
   "2025-01-01","2025-03-03","2025-03-04","2025-04-18","2025-04-19",
@@ -597,7 +599,13 @@ async function loadFromFirebase(){
   setBaseline(STATE.sales,STATE.bank);
 }
 
-function setSyncStatus(state){
+// Tamanho aproximado (bytes UTF-8) do que é gravado no doc do Firestore.
+function docSizeBytes(){
+  try{ return new TextEncoder().encode(JSON.stringify({sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config})).length; }
+  catch(e){ return 0; }
+}
+
+function setSyncStatus(state,detail){
   const dot=document.getElementById("sync-dot");
   const txt=document.getElementById("sync-text");
   const wrap=document.getElementById("sync-status");
@@ -611,6 +619,9 @@ function setSyncStatus(state){
     dot.classList.add("error");
     wrap.classList.add("error");
     txt.innerHTML='⚠️ Falha ao salvar — dados NÃO enviados.<button class="sync-retry" onclick="retrySave()">Tentar novamente</button>';
+  }else if(state==="warn"){
+    dot.classList.add("warn");
+    txt.textContent=`Sincronizado · ⚠️ base em ${detail} KB de ~1 MB — considere arquivar dados antigos`;
   }else{ // saved
     txt.textContent="Sincronizado com Firebase";
   }
@@ -640,7 +651,13 @@ async function flushSave(){
       if(document.getElementById("app").style.display!=="none") renderCurrentTab();
     }
     _savePending=false;
-    setSyncStatus("saved");
+    const bytes=docSizeBytes();
+    if(bytes>DOC_SIZE_WARN){
+      console.warn(`[saveToFirebase] base em ${Math.round(bytes/1024)} KB (limite ~1 MB por doc).`);
+      setSyncStatus("warn",Math.round(bytes/1024));
+    }else{
+      setSyncStatus("saved");
+    }
   }catch(e){
     _savePending=true;
     console.error("[saveToFirebase] falha ao gravar:",e?.code,e?.message,e);
