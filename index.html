@@ -347,8 +347,11 @@ const DEFAULT_MDR = {
 
 const DEFAULT_CONFIG = {
   postoName:"Posto 1",
-  liquidation:Object.fromEntries(MODALITIES.map(m=>[m.name,0])),
-  corridos:Object.fromEntries(MODALITIES.map(m=>[m.name,false])),
+  // Prazos default vêm de MODALITIES (Débito D+1, Crédito D+30 corridos,
+  // Voucher D+1, Pix D+0). Antes eram 0 → tudo liquidava no mesmo dia,
+  // inclusive crédito. Config já salva no Firestore prevalece no merge.
+  liquidation:Object.fromEntries(MODALITIES.map(m=>[m.name,m.d])),
+  corridos:Object.fromEntries(MODALITIES.map(m=>[m.name,m.corridos])),
   holidays:DEFAULT_HOLIDAYS,
   tolerance:2,
 };
