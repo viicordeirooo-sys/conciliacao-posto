@@ -1561,7 +1561,10 @@ function renderConfig(){
       <div class="btn-row">
         <button class="btn" onclick="openExport()">⬇ Exportar dados</button>
         <button class="btn btn-dark" onclick="openImport()">⬆ Importar dados</button>
+        <button class="btn" id="backup-btn" onclick="exportBackupJSON()">💾 Exportar Backup (.json)</button>
+        <span id="backup-msg"></span>
       </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px">Baixa um arquivo <code>.json</code> com tudo do banco — para backup semanal. Somente leitura, não altera os dados.</div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="card">
@@ -1640,6 +1643,67 @@ window.copyExport=function(){
 
 window.openImport=function(){
   document.getElementById("import-modal").style.display="flex";
+};
+
+// ─── Backup JSON (somente leitura) ──────────────────────────────────────────
+// Converte recursivamente Timestamps do Firestore (via .toDate() ou
+// {seconds,nanoseconds}) em strings ISO. Neste projeto as datas já são strings
+// (YYYY-MM-DD / ISO), então é efetivamente passthrough — mantido por paridade
+// com os backups do Mahau-sistema e do Mahau-CRM.
+function backupSerialize(v){
+  if(v==null)return v;
+  if(typeof v.toDate==="function"){ try{ return v.toDate().toISOString(); }catch(e){ return String(v); } }
+  if(typeof v==="object"&&typeof v.seconds==="number"&&typeof v.nanoseconds==="number"){
+    return new Date(v.seconds*1000+Math.round(v.nanoseconds/1e6)).toISOString();
+  }
+  if(Array.isArray(v))return v.map(backupSerialize);
+  if(typeof v==="object"){ const o={}; for(const k in v)o[k]=backupSerialize(v[k]); return o; }
+  return v;
+}
+
+// YYYY-MM-DD-HH-mm em horário local.
+function backupStamp(){
+  const d=new Date(),p=n=>String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}-${p(d.getHours())}-${p(d.getMinutes())}`;
+}
+
+window.exportBackupJSON=async function(){
+  const btn=document.getElementById("backup-btn");
+  const orig=btn?btn.textContent:"";
+  if(btn){ btn.disabled=true; btn.textContent="⏳ Exportando..."; }
+  try{
+    // Lê fresco do Firestore (fonte da verdade), não da STATE em memória.
+    const snap=await getDoc(doc(db,"conciliacao",DOC_ID));
+    const data=snap.exists()?backupSerialize(snap.data()):{};
+    const sales=Array.isArray(data.sales)?data.sales:[];
+    const bank=Array.isArray(data.bank)?data.bank:[];
+
+    const backup={
+      exported_at:new Date().toISOString(),
+      project:"conciliacao-posto",
+      version:1,
+      counts:{ documentos:snap.exists()?1:0, vendas:sales.length, extrato:bank.length },
+      collections:{ conciliacao:{ [DOC_ID]:data } }
+    };
+
+    const json=JSON.stringify(backup,null,2);
+    const url=URL.createObjectURL(new Blob([json],{type:"application/json"}));
+    const a=document.createElement("a");
+    a.href=url;
+    a.download=`conciliacao-posto-backup-${backupStamp()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    const total=backup.counts.vendas+backup.counts.extrato;
+    showMsg("backup-msg",`✅ Backup gerado: ${backup.counts.vendas} venda(s) + ${backup.counts.extrato} entrada(s) = ${total} registro(s).`,"ok");
+  }catch(e){
+    console.error("[exportBackupJSON] falha:",e);
+    showMsg("backup-msg","Erro ao gerar backup: "+(e?.message||e),"err");
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent=orig; }
+  }
 };
 
 window.doImport=function(){
