@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A card-payment **reconciliation tool for a Brazilian gas station ("posto")**. It tracks card/Pix sales, computes acquirer fees (MDR) and expected deposit dates, then reconciles those against actual bank deposits. UI and domain terms are in pt-BR.
 
-The **entire application is `index.html`** — one ~1450-line file containing HTML, CSS, and vanilla-JS logic. There is no build step, no framework, no package manager, no tests, and no dependencies installed in the repo. Third-party libraries (Firebase, PDF.js, SheetJS) are loaded from CDNs at runtime.
+The **entire application is `index.html`** — one ~1800-line file containing HTML, CSS, and vanilla-JS logic. There is no build step, no framework, no package manager, no tests, and no dependencies installed in the repo. Third-party libraries (Firebase, PDF.js, SheetJS) are loaded from CDNs at runtime.
 
 ## Running / developing
 
@@ -25,8 +25,8 @@ To deploy, host `index.html` as a static file on any HTTPS host (the Firebase co
 
 **Single source of truth:** the module-level `STATE = {sales, bank, mdr, config}` object. All tabs render from it; all mutations go through it then call `saveToFirebase()`.
 
-**Persistence model:** one Firestore document, `conciliacao/posto1` (`DOC_ID = "posto1"`). The whole `STATE` is written to that single doc. This means the app is effectively **single-tenant / single-shared-account** — every authenticated user reads and writes the same document.
-- `saveToFirebase()` debounces writes 800ms.
+**Persistence model:** one Firestore document, `conciliacao/posto1` (`DOC_ID = "posto1"`). The whole `STATE` is persisted to that single doc. This means the app is effectively **single-tenant / single-shared-account** — every authenticated user reads and writes the same document.
+- `saveToFirebase()` debounces 800ms; `flushSave()` then runs a `runTransaction` (read-modify-write) instead of overwriting the doc. `mergeListById` does a 3-way merge per id: starts from the remote list, removes ids deleted locally (tracked via `_baselineSaleIds`), then applies local adds/edits — preventing lost-update between users. `mdr`/`config` follow last-writer-wins. `setSyncStatus` reports saving/saved/warn/error states with `retrySave()`, and the save warns when the doc nears the Firestore 1 MB limit (`docSizeBytes`).
 - `onSnapshot` gives real-time sync; it ignores its own pending writes (`metadata.hasPendingWrites`) to avoid clobbering local edits, and re-renders the current tab on remote changes.
 - `loadFromFirebase` / snapshot merge incoming `mdr` and `config` over the `DEFAULT_*` constants, so new default keys survive old saved docs.
 
@@ -37,17 +37,20 @@ To deploy, host `index.html` as a static file on any HTTPS host (the Firebase co
 
 **The five tabs:** `conciliacao` (reconciliation table + status stats), `vendas` (enter/import sales), `extrato` (enter/import bank credits), `resumo` (per-month totals by card brand), `config` (posto name, tolerance, liquidation terms, MDR rates, holidays, export/import).
 
+The `config` tab also has an **"Exportar Backup (.json)"** button (`exportBackupJSON`): it reads the `conciliacao/posto1` doc straight from Firestore (`getDoc`, **read-only — never mutates data**), serializes it (`backupSerialize`) and downloads a timestamped `conciliacao-posto-backup-<YYYY-MM-DD...>.json` for weekly off-site backup, reporting the sales+bank record counts.
+
 ### Domain logic (the core, lines ~310–482)
 
 - **MDR** = acquirer fee. `STATE.mdr[bandeira][modality]` is a percentage; `getMDR()` divides by 100. `enrichSale()` derives `custoMDR` and `liquido` (net) from gross `amount`.
-- **Expected deposit date** = `calcDeposit(date, modality)` using per-modality liquidation terms in `STATE.config`: `liquidation[modality]` (number of days) and `corridos[modality]` (true = calendar days via `addCalendarDays`, false = business days via `addBusinessDays`, which skips weekends and `config.holidays`).
+- **Expected deposit date** is **frozen at entry**: `addSale`/PDF-import store `expectedDate = calcDeposit(date, modality)` on the record. `enrichSale()` then **prefers the stored `expectedDate`** (preserved across export round-trips) and only falls back to `calcDeposit` for legacy records lacking the field — so changing the liquidation config or "today" does not silently move past deposit dates. `calcDeposit(date, modality)` uses per-modality terms in `STATE.config`: `liquidation[modality]` (number of days) and `corridos[modality]` (true = calendar days via `addCalendarDays`, false = business days via `addBusinessDays`, which skips weekends and `config.holidays`). The **"Recalcular datas"** button (`recalcExpectedDates`) re-freezes all sales' `expectedDate` with the current config (confirmation required; may change reconciliation status).
 - **Reconciliation** = `getReconciliation()`: groups enriched sales by `expectedDate`, sums bank credits by date, and assigns a status per group:
   - `conciliado` (bank matches expected within `config.tolerance` R$), `divergencia` (bank present but outside tolerance), `atrasado` (no bank credit and ≥2 days past), `em_aberto` (no credit, 0–1 days past), `a_vencer` (date in future).
+  - `sem_venda` (a bank credit exists on a date with **no matching sales group** — money came in on a date with no expected sale). Emitted in a second pass over `bankByDate` for dates not covered by any sales group; surfaces its own stat-card, filter option, badge and alert.
 
 ### Importers (heuristic, fragile by nature)
 
 - **PDF (PagBank sales report):** `importPDF` → `parsePagBankPDF`. PDF.js extracts text items tagged with a global index `[n]`; the parser finds gross values and infers the fee/net by **fixed index offsets** (`idx+2`, `idx+4`) and locates date/type in nearby index windows. There's also a **"Debug PDF"** button (`runDebugPDF`) that dumps the raw indexed text of the first 2 pages — use it when a statement layout changes and offsets break.
-- **XLSX (PagBank bank statement):** `importXLSX` assumes a fixed layout — header at row index 8, data from row 9, columns `0=Data, 2=Tipo, 4=Descrição, 5=Entradas`.
+- **XLSX (PagBank bank statement):** `importXLSX` → `mapXlsxColumns` + `parseXlsxBankRows`. The header row is detected dynamically (scans up to 50 rows for a row containing "data" plus a value column — `entradas`/`credito`/`valor`, in that priority) and columns are mapped **by normalized name**, not fixed index — the PagBank layout varies in metadata rows / column positions. Data rows parse a `dd/mm/yyyy` string or an Excel serial date, skip "saldo" rows, and use `parseBRLNumber`.
 - Both **dedupe** on a synthetic `extId` so re-importing the same file is safe.
 
 ### Security features (already implemented)
