@@ -183,6 +183,7 @@ tr:hover td{background:#0a1628}
 .posto-sub.error{color:#f48fb1}
 .sync-retry{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;text-decoration:underline;padding:0;margin-left:6px;font-family:var(--font)}
 .access-banner{position:fixed;top:0;left:0;right:0;z-index:9999;background:#3a0010;border-bottom:2px solid var(--red);color:#ffb3c1;padding:12px 16px;text-align:center;font-size:14px;font-weight:600}
+.data-banner{position:fixed;top:0;left:0;right:0;z-index:9998;background:#2a2200;border-bottom:2px solid var(--accent);color:#ffe08a;padding:12px 16px;text-align:center;font-size:14px;font-weight:600}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 </style>
 </head>
@@ -190,6 +191,9 @@ tr:hover td{background:#0a1628}
 
 <!-- Banner fixo de acesso negado (RBAC): mostrado por showAccessError() -->
 <div id="access-banner" class="access-banner" style="display:none"></div>
+
+<!-- Banner âmbar: registros remotos inválidos ignorados (≠ acesso negado) -->
+<div id="data-banner" class="data-banner" style="display:none"></div>
 
 <!-- LOGIN -->
 <div id="login-screen">
@@ -424,28 +428,47 @@ function escHtml(s){
 function isPlainObject(o){ return o!=null && typeof o==="object" && !Array.isArray(o); }
 const _DATE_RE=/^\d{4}-\d{2}-\d{2}$/;
 // Normaliza/valida uma venda do JSON importado. Lança no 1º problema (fail-fast).
-function normSale(s,i){
+// remote=true (caminho snapshot/load): id inválido LANÇA (será pulado pelo
+// sanitizeRemoteList, não auto-corrigido). remote ausente (import): regenera id.
+function normSale(s,i,remote){
   if(!isPlainObject(s)) throw new Error(`venda #${i+1}: registro inválido`);
   if(!_DATE_RE.test(s.date)) throw new Error(`venda #${i+1}: data inválida (use AAAA-MM-DD)`);
+  if(isNaN(new Date(s.date+"T12:00:00"))) throw new Error(`venda #${i+1}: data inexistente (${s.date})`); // regex só valida formato; 2025-13-99 cai aqui
   const amount=Number(s.amount);
   if(!Number.isFinite(amount)||amount<=0||amount>9999999) throw new Error(`venda #${i+1}: valor inválido`);
   if(!BANDEIRAS.includes(s.bandeira)) throw new Error(`venda #${i+1}: bandeira "${s.bandeira}" desconhecida`);
   if(!MODALITIES.some(m=>m.name===s.modality)) throw new Error(`venda #${i+1}: modalidade "${s.modality}" desconhecida`);
-  const out={id:(typeof s.id==="string"&&s.id)?s.id:uid(),date:s.date,bandeira:s.bandeira,modality:s.modality,amount};
+  const idOk=(typeof s.id==="string"&&/^[A-Za-z0-9_-]{1,40}$/.test(s.id));
+  if(remote&&!idOk) throw new Error(`venda #${i+1}: id inválido`);
+  const out={id:idOk?s.id:uid(),date:s.date,bandeira:s.bandeira,modality:s.modality,amount};
   if(s.extId!=null) out.extId=String(s.extId);
   if(s.liquidoReal!=null){ const lr=Number(s.liquidoReal); if(Number.isFinite(lr)&&lr>=0&&lr<=amount) out.liquidoReal=lr; }
-  if(typeof s.expectedDate==="string"&&_DATE_RE.test(s.expectedDate)) out.expectedDate=s.expectedDate; // preserva data congelada (round-trip de export)
+  if(typeof s.expectedDate==="string"&&_DATE_RE.test(s.expectedDate)&&!isNaN(new Date(s.expectedDate+"T12:00:00"))) out.expectedDate=s.expectedDate; // preserva data congelada (round-trip); descarta data impossível → fallback calcDeposit
   return out;
 }
 // Normaliza/valida uma entrada bancária do JSON importado.
-function normBank(e,i){
+function normBank(e,i,remote){
   if(!isPlainObject(e)) throw new Error(`entrada #${i+1}: registro inválido`);
   if(!_DATE_RE.test(e.date)) throw new Error(`entrada #${i+1}: data inválida (use AAAA-MM-DD)`);
+  if(isNaN(new Date(e.date+"T12:00:00"))) throw new Error(`entrada #${i+1}: data inexistente (${e.date})`);
   const amount=Number(e.amount);
   if(!Number.isFinite(amount)||amount<=0||amount>9999999) throw new Error(`entrada #${i+1}: valor inválido`);
-  const out={id:(typeof e.id==="string"&&e.id)?e.id:uid(),date:e.date,amount,description:String(e.description||"").trim().slice(0,200)};
+  const idOk=(typeof e.id==="string"&&/^[A-Za-z0-9_-]{1,40}$/.test(e.id));
+  if(remote&&!idOk) throw new Error(`entrada #${i+1}: id inválido`);
+  const out={id:idOk?e.id:uid(),date:e.date,amount,description:String(e.description||"").trim().slice(0,200)};
   if(e.extId!=null) out.extId=String(e.extId);
   return out;
+}
+
+// Caminho REMOTO (snapshot/load): valida cada registro reusando normSale/normBank
+// com remote=true. Registro inválido é PULADO (não derruba o lote, não regenera id).
+function sanitizeRemoteList(arr,normFn){
+  const out=[]; let skipped=0;
+  (Array.isArray(arr)?arr:[]).forEach((item,i)=>{
+    try{ out.push(normFn(item,i,true)); }
+    catch(e){ skipped++; console.warn("[remoto] registro ignorado:",e?.message); }
+  });
+  return {list:out,skipped};
 }
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
@@ -596,15 +619,17 @@ function mergeListById(remoteList,localList,baselineIds){
 async function loadFromFirebase(){
   const ref=doc(db,"conciliacao",DOC_ID);
   const snap=await getDoc(ref);
+  let skipped=0;
   if(snap.exists()){
     const d=snap.data();
-    if(d.sales)STATE.sales=d.sales;
-    if(d.bank)STATE.bank=d.bank;
+    if(d.sales){ const rs=sanitizeRemoteList(d.sales,normSale); STATE.sales=rs.list; skipped+=rs.skipped; }
+    if(d.bank){ const rb=sanitizeRemoteList(d.bank,normBank); STATE.bank=rb.list; skipped+=rb.skipped; }
     if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
     if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
   }
   setBaseline(STATE.sales,STATE.bank);
   hideAccessError(); // getDoc ok → acesso funcionando, limpa banner se estava visível
+  if(skipped>0) showDataWarning(`${skipped} registro(s) inválido(s) foram ignorados.`); else hideDataWarning();
 }
 
 // Tamanho aproximado (bytes UTF-8) do que é gravado no doc do Firestore.
@@ -652,6 +677,16 @@ function showAccessError(err){
 // Some com o banner quando o acesso volta a funcionar (load/snapshot OK).
 function hideAccessError(){
   const b=document.getElementById("access-banner");
+  if(b) b.style.display="none";
+}
+// Aviso ÂMBAR — registros remotos inválidos foram pulados (corrupção de dados),
+// semântica distinta do #access-banner (vermelho = sem permissão).
+function showDataWarning(msg){
+  const b=document.getElementById("data-banner");
+  if(b){ b.textContent="⚠️ "+msg; b.style.display="block"; }
+}
+function hideDataWarning(){
+  const b=document.getElementById("data-banner");
   if(b) b.style.display="none";
 }
 
@@ -731,12 +766,14 @@ onAuthStateChanged(auth,async(user)=>{
         try{
           if(snap.exists()&&snap.metadata.hasPendingWrites===false){
             const d=snap.data();
-            if(d.sales)STATE.sales=d.sales;
-            if(d.bank)STATE.bank=d.bank;
+            let skipped=0;
+            if(d.sales){ const rs=sanitizeRemoteList(d.sales,normSale); STATE.sales=rs.list; skipped+=rs.skipped; }
+            if(d.bank){ const rb=sanitizeRemoteList(d.bank,normBank); STATE.bank=rb.list; skipped+=rb.skipped; }
             if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
             if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
             setBaseline(STATE.sales,STATE.bank);
             hideAccessError(); // snapshot ok → acesso funcionando, limpa banner
+            if(skipped>0) showDataWarning(`${skipped} registro(s) remoto(s) inválido(s) foram ignorados.`); else hideDataWarning();
             if(document.getElementById("app").style.display!=="none") renderCurrentTab();
           }
         }catch(e){
@@ -1318,7 +1355,7 @@ function renderExtrato(){
       <div class="sec-title">Lançar Entrada do Banco</div>
       <div class="form-grid form-grid-3">
         <div><label class="lbl">Data do Crédito</label><input type="date" value="${eForm.date}" onchange="setEForm('date',this.value)"></div>
-        <div><label class="lbl">Descrição</label><input type="text" placeholder="ex: CIELO DEBITO 16/05" value="${eForm.description}" oninput="setEFormField('description',this.value)"></div>
+        <div><label class="lbl">Descrição</label><input type="text" placeholder="ex: CIELO DEBITO 16/05" value="${escHtml(eForm.description)}" oninput="setEFormField('description',this.value)"></div>
         <div><label class="lbl">Valor Líquido (R$)</label><input type="number" step="0.01" min="0" placeholder="0,00" value="${eForm.amount}" oninput="setEFormField('amount',this.value)" onkeydown="if(event.key==='Enter')addBank()"></div>
       </div>
       ${totalDia>0?`<div style="font-size:12px;color:var(--muted);margin-top:8px">Total em ${fmtDate(eForm.date)}: <strong style="color:var(--blue)">${fmtBRL(totalDia)}</strong></div>`:""}
@@ -1506,7 +1543,7 @@ function renderResumo(){
     pb[s.bandeira].liquido+=s.liquido;pb[s.bandeira].count++;
   });
   const bandRows=Object.entries(pb).sort((a,b)=>b[1].bruto-a[1].bruto).map(([b,v])=>`<tr>
-    <td style="font-weight:700">${b}</td>
+    <td style="font-weight:700">${escHtml(b)}</td>
     <td>${v.count}</td>
     <td style="color:var(--purple)">${fmtBRL(v.bruto)}</td>
     <td style="color:var(--red);font-size:11px">${fmtBRL(v.mdr)}</td>
@@ -1756,12 +1793,12 @@ window.doImport=function(){
     if(d.sales!==undefined){
       if(!Array.isArray(d.sales)) throw new Error("campo sales inválido");
       if(d.sales.length>50000) throw new Error("muitos registros");
-      newSales=d.sales.map(normSale); // fail-fast: lança no 1º registro inválido
+      newSales=d.sales.map((s,i)=>normSale(s,i)); // 2 args (remote=undefined → regenera id). fail-fast: lança no 1º inválido
     }
     if(d.bank!==undefined){
       if(!Array.isArray(d.bank)) throw new Error("campo bank inválido");
       if(d.bank.length>50000) throw new Error("muitos registros");
-      newBank=d.bank.map(normBank);
+      newBank=d.bank.map((e,i)=>normBank(e,i)); // 2 args (remote=undefined → regenera id)
     }
     // Tudo validou — agora aplica.
     if(newSales!==undefined) STATE.sales=newSales;
