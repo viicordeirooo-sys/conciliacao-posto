@@ -182,10 +182,14 @@ tr:hover td{background:#0a1628}
 .sync-dot.error{background:var(--red);animation:none}
 .posto-sub.error{color:#f48fb1}
 .sync-retry{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;text-decoration:underline;padding:0;margin-left:6px;font-family:var(--font)}
+.access-banner{position:fixed;top:0;left:0;right:0;z-index:9999;background:#3a0010;border-bottom:2px solid var(--red);color:#ffb3c1;padding:12px 16px;text-align:center;font-size:14px;font-weight:600}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 </style>
 </head>
 <body>
+
+<!-- Banner fixo de acesso negado (RBAC): mostrado por showAccessError() -->
+<div id="access-banner" class="access-banner" style="display:none"></div>
 
 <!-- LOGIN -->
 <div id="login-screen">
@@ -600,6 +604,7 @@ async function loadFromFirebase(){
     if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
   }
   setBaseline(STATE.sales,STATE.bank);
+  hideAccessError(); // getDoc ok → acesso funcionando, limpa banner se estava visível
 }
 
 // Tamanho aproximado (bytes UTF-8) do que é gravado no doc do Firestore.
@@ -628,6 +633,26 @@ function setSyncStatus(state,detail){
   }else{ // saved
     txt.textContent="Sincronizado com Firebase";
   }
+}
+
+// Erro de acesso ÓBVIO na tela. permission-denied → banner fixo no topo
+// (o usuário autenticou mas não tem papel admin/partner). Qualquer outro
+// erro → status de sync vermelho (com botão "Tentar novamente"), já existente.
+function showAccessError(err){
+  if(err?.code==="permission-denied"){
+    const b=document.getElementById("access-banner");
+    if(b){
+      b.textContent="🔒 Sua conta não tem permissão de acesso. Contate o administrador para receber um papel (admin/partner).";
+      b.style.display="block";
+    }
+  }else{
+    setSyncStatus("error");
+  }
+}
+// Some com o banner quando o acesso volta a funcionar (load/snapshot OK).
+function hideAccessError(){
+  const b=document.getElementById("access-banner");
+  if(b) b.style.display="none";
 }
 
 async function flushSave(){
@@ -691,8 +716,15 @@ onAuthStateChanged(auth,async(user)=>{
     document.getElementById("login-email").value="";
     document.getElementById("login-input").value="";
     document.getElementById("login-error").textContent="";
-    await loadFromFirebase().catch(()=>{});
-    try{ renderCurrentTab(); }catch(e){}
+    await loadFromFirebase().catch(e=>{
+      console.error("[loadFromFirebase] falha:",e?.code,e?.message);
+      showAccessError(e);
+    });
+    try{ renderCurrentTab(); }
+    catch(e){
+      console.error("[render] falha ao renderizar aba:",e);
+      showAccessError(e);
+    }
     unsubscribeSnapshot=onSnapshot(
       doc(db,"conciliacao",DOC_ID),
       (snap)=>{
@@ -704,11 +736,18 @@ onAuthStateChanged(auth,async(user)=>{
             if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
             if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
             setBaseline(STATE.sales,STATE.bank);
+            hideAccessError(); // snapshot ok → acesso funcionando, limpa banner
             if(document.getElementById("app").style.display!=="none") renderCurrentTab();
           }
-        }catch(e){ console.log("snapshot render error",e); }
+        }catch(e){
+          console.error("[snapshot] falha ao aplicar dados remotos:",e);
+          showAccessError(e);
+        }
       },
-      (err)=>{ console.log("snapshot error",err); }
+      (err)=>{
+        console.error("[snapshot] erro no listener:",err?.code,err?.message);
+        showAccessError(err);
+      }
     );
     resetSessionTimer();
     ['mousemove','click','keydown','scroll','touchstart'].forEach(ev=>{
