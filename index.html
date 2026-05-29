@@ -331,6 +331,9 @@ const DEFAULT_HOLIDAYS = [
   "2026-01-01","2026-02-16","2026-02-17","2026-04-03","2026-04-05",
   "2026-04-21","2026-05-01","2026-06-04","2026-09-07","2026-10-12",
   "2026-11-02","2026-11-15","2026-11-20","2026-12-25",
+  "2027-01-01","2027-02-08","2027-02-09","2027-03-26","2027-04-21",
+  "2027-05-01","2027-05-27","2027-09-07","2027-10-12","2027-11-02",
+  "2027-11-15","2027-11-20","2027-12-25",
 ];
 
 const BANDEIRAS = ["Visa","Mastercard","Elo","Hipercard","Amex","VR","VA","Pix","Outro"];
@@ -469,6 +472,37 @@ function sanitizeRemoteList(arr,normFn){
     catch(e){ skipped++; console.warn("[remoto] registro ignorado:",e?.message); }
   });
   return {list:out,skipped};
+}
+
+// ─── Clamps de inputs de dinheiro (defesa contra NaN/negativo/absurdo) ───
+// window.* porque handlers inline (onchange=) rodam em escopo global e não
+// enxergam funções de módulo. Definidas no módulo → ainda veem round2/consts.
+window.clampTolerancia=function(v){
+  const n=parseFloat(v);
+  return Number.isFinite(n)?round2(Math.min(Math.max(n,0),100)):0.05; // [0,100] R$, default 0.05
+};
+window.clampDiasLiq=function(v,def){
+  const n=parseInt(v,10);
+  const fb=Number.isFinite(def)?def:1;                                // fallback = m.d da modalidade
+  return Number.isFinite(n)?Math.min(Math.max(n,0),90):fb;            // inteiro [0,90]
+};
+window.clampTaxaMdr=function(v){
+  const n=parseFloat(v);
+  return Number.isFinite(n)?Math.min(Math.max(n,0),20):0;             // [0,20]%, default 0 (sem round: input usa step 0.001)
+};
+
+// Saneia config/mdr remotos DEPOIS do merge, retornando objetos NOVOS (não muta
+// DEFAULT_* compartilhado por referência). Defense in depth: valor envenenado
+// no doc (NaN/negativo) não entra no STATE nem quebra conciliação/cálculo.
+function sanitizeConfig(cfg){
+  const liq={};
+  MODALITIES.forEach(m=>{ liq[m.name]=clampDiasLiq(cfg.liquidation?.[m.name],m.d); });
+  return {...cfg, tolerance:clampTolerancia(cfg.tolerance), liquidation:liq};
+}
+function sanitizeMdr(mdr){
+  const out={};
+  BANDEIRAS.forEach(b=>{ out[b]={}; MODALITIES.forEach(m=>{ out[b][m.name]=clampTaxaMdr(mdr?.[b]?.[m.name]); }); });
+  return out;
 }
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
@@ -624,8 +658,8 @@ async function loadFromFirebase(){
     const d=snap.data();
     if(d.sales){ const rs=sanitizeRemoteList(d.sales,normSale); STATE.sales=rs.list; skipped+=rs.skipped; }
     if(d.bank){ const rb=sanitizeRemoteList(d.bank,normBank); STATE.bank=rb.list; skipped+=rb.skipped; }
-    if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
-    if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+    if(d.mdr)STATE.mdr=sanitizeMdr({...DEFAULT_MDR,...d.mdr});
+    if(d.config)STATE.config=sanitizeConfig({...DEFAULT_CONFIG,...d.config});
   }
   setBaseline(STATE.sales,STATE.bank);
   hideAccessError(); // getDoc ok → acesso funcionando, limpa banner se estava visível
@@ -769,8 +803,8 @@ onAuthStateChanged(auth,async(user)=>{
             let skipped=0;
             if(d.sales){ const rs=sanitizeRemoteList(d.sales,normSale); STATE.sales=rs.list; skipped+=rs.skipped; }
             if(d.bank){ const rb=sanitizeRemoteList(d.bank,normBank); STATE.bank=rb.list; skipped+=rb.skipped; }
-            if(d.mdr)STATE.mdr={...DEFAULT_MDR,...d.mdr};
-            if(d.config)STATE.config={...DEFAULT_CONFIG,...d.config};
+            if(d.mdr)STATE.mdr=sanitizeMdr({...DEFAULT_MDR,...d.mdr});
+            if(d.config)STATE.config=sanitizeConfig({...DEFAULT_CONFIG,...d.config});
             setBaseline(STATE.sales,STATE.bank);
             hideAccessError(); // snapshot ok → acesso funcionando, limpa banner
             if(skipped>0) showDataWarning(`${skipped} registro(s) remoto(s) inválido(s) foram ignorados.`); else hideDataWarning();
@@ -1603,7 +1637,7 @@ function renderConfig(){
       <span style="flex:1;font-size:12px">${m.name}</span>
       <input type="number" min="0" max="90" style="width:60px;text-align:center"
         value="${STATE.config.liquidation[m.name]??m.d}"
-        onchange="STATE.config.liquidation['${m.name}']=Number(this.value);saveToFirebase()">
+        onchange="STATE.config.liquidation['${m.name}']=clampDiasLiq(this.value,${m.d});saveToFirebase()">
       <select style="width:90px;font-size:11px" onchange="STATE.config.corridos['${m.name}']=this.value==='corridos';saveToFirebase()">
         <option value="úteis"${!STATE.config.corridos[m.name]?" selected":""}>úteis</option>
         <option value="corridos"${STATE.config.corridos[m.name]?" selected":""}>corridos</option>
@@ -1618,7 +1652,7 @@ function renderConfig(){
       <div style="display:flex;align-items:center;gap:6px">
         <input type="number" step="0.001" min="0" max="20" style="width:100%"
           value="${(STATE.mdr[mdrBandeira]?.[m.name]??0).toFixed(3)}"
-          onchange="STATE.mdr['${mdrBandeira}']['${m.name}']=Number(this.value);saveToFirebase()">
+          onchange="STATE.mdr['${mdrBandeira}']['${m.name}']=clampTaxaMdr(this.value);saveToFirebase()">
         <span style="font-size:12px;color:var(--muted)">%</span>
       </div>
     </div>`).join("");
@@ -1651,7 +1685,7 @@ function renderConfig(){
         </div>
         <div>
           <label class="lbl">Tolerância de divergência (R$)</label>
-          <input type="number" min="0" step="0.01" style="width:100px" value="${STATE.config.tolerance}" onchange="STATE.config.tolerance=Number(this.value);saveToFirebase()">
+          <input type="number" min="0" step="0.01" style="width:100px" value="${STATE.config.tolerance}" onchange="STATE.config.tolerance=clampTolerancia(this.value);saveToFirebase()">
           <div style="font-size:11px;color:var(--muted);margin-top:4px">Folga só p/ arredondamento. Diferenças até esse valor → ✅ Conciliado. Valores altos <strong>escondem</strong> divergência real (recomendado: R$ 0,05).</div>
         </div>
       </div>
@@ -1803,8 +1837,8 @@ window.doImport=function(){
     // Tudo validou — agora aplica.
     if(newSales!==undefined) STATE.sales=newSales;
     if(newBank!==undefined) STATE.bank=newBank;
-    if(isPlainObject(d.mdr))STATE.mdr={...DEFAULT_MDR,...d.mdr};
-    if(isPlainObject(d.config))STATE.config={...DEFAULT_CONFIG,...d.config};
+    if(isPlainObject(d.mdr))STATE.mdr=sanitizeMdr({...DEFAULT_MDR,...d.mdr});
+    if(isPlainObject(d.config))STATE.config=sanitizeConfig({...DEFAULT_CONFIG,...d.config});
     saveToFirebase();
     document.getElementById("import-text").value="";
     closeModal("import-modal");
