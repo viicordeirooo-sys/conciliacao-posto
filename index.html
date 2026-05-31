@@ -1968,6 +1968,15 @@ function renderConfig(){
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:8px">Baixa um arquivo <code>.json</code> com tudo do banco — para backup semanal. Somente leitura, não altera os dados.</div>
     </div>
+    <div class="card">
+      <div class="sec-title">Migração para paginação (1MB)</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Operação <strong>única</strong> que reorganiza os dados por mês para não estourar o limite de 1 MB do Firestore. <strong>Exporte um backup (.json) acima ANTES de prosseguir.</strong> Por enquanto só a simulação está disponível — nada é gravado.</p>
+      <div class="btn-row">
+        <button class="btn btn-dark" onclick="dryRunBackfill()">🧪 Simular migração (dry-run)</button>
+        <span id="backfill-msg"></span>
+      </div>
+      <div id="backfill-preview" style="margin-top:12px"></div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="card">
         <div class="sec-title">Identificação</div>
@@ -2010,6 +2019,42 @@ function renderConfig(){
 }
 
 window.setMdrBandeira=function(b){mdrBandeira=b;renderConfig();}
+
+// Fase 4 sub-2: DRY-RUN do backfill — só preview/leitura. Chama buildBackfillPlan()
+// (puro) e desenha o plano + conferência em #backfill-preview. NÃO grava, NÃO chama
+// Firestore, NÃO muda STATE. window.* (handler inline). Tudo escapado via escHtml().
+window.dryRunBackfill=function(){
+  const plan=window.buildBackfillPlan();
+  const el=document.getElementById("backfill-preview");
+  if(!el)return;
+  const t=plan.totais;
+  const rows=plan.meses.map(m=>`<tr>
+    <td>${escHtml(m.mes)}</td>
+    <td style="text-align:right">${escHtml(m.salesCount)}</td>
+    <td style="text-align:right">${escHtml(m.bankCount)}</td>
+  </tr>`).join("");
+  const selo=(ok)=>ok?`<span class="badge badge-ok">OK</span>`:`<span class="badge badge-late">DIVERGÊNCIA</span>`;
+  const semMesAviso=(plan.semMes.salesCount>0||plan.semMes.bankCount>0)
+    ? `<div class="alert-late" style="background:#1a1400;border-color:#d4a01740;color:#e6c34a;margin-top:12px">⚠️ <strong>${escHtml(plan.semMes.salesCount)} venda(s) e ${escHtml(plan.semMes.bankCount)} crédito(s) com data inválida (sem mês)</strong> — esses registros precisam de atenção antes de qualquer gravação; não entram em nenhum mês.</div>`
+    : "";
+  el.innerHTML=`
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Mês</th><th style="text-align:right">Vendas</th><th style="text-align:right">Créditos</th></tr></thead>
+        <tbody>${rows||`<tr><td colspan="3" style="color:var(--muted)">Nenhum mês.</td></tr>`}</tbody>
+        <tfoot><tr style="font-weight:700;border-top:1px solid var(--border)">
+          <td>Total</td>
+          <td style="text-align:right">${escHtml(t.planSales)}</td>
+          <td style="text-align:right">${escHtml(t.planBank)}</td>
+        </tr></tfoot>
+      </table>
+    </div>
+    <div style="margin-top:12px;display:flex;flex-direction:column;gap:6px;font-size:12px">
+      <div>Vendas: STATE ${escHtml(t.stateSales)} vs plano ${escHtml(t.planSales)} ${selo(t.salesOk)}</div>
+      <div>Créditos: STATE ${escHtml(t.stateBank)} vs plano ${escHtml(t.planBank)} ${selo(t.bankOk)}</div>
+    </div>
+    ${semMesAviso}`;
+};
 
 // Recongela expectedDate de todas as vendas com a config atual (prazos/feriados).
 window.recalcExpectedDates=function(){
