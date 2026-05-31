@@ -32,10 +32,17 @@ service cloud.firestore {
     function isAdmin()   { return role() == "admin"; }
     function isPartner() { return role() == "partner"; }
 
-    // Único dado do app: a coleção 'conciliacao' (doc 'posto1').
-    // Acesso total apenas para admin OU partner.
+    // Dados do app na coleção 'conciliacao'. Hardening (v4): além do RBAC,
+    // o docId precisa ser um id LEGÍTIMO (defesa em profundidade — impede que
+    // uma conta autorizada crie/leia docs arbitrários na coleção).
+    //   posto1            → doc legado (single-doc; mantido p/ rollback)
+    //   posto1_meta       → config/mdr + índice de meses (modelo paginado)
+    //   posto1_m_YYYY-MM  → dados de um mês (sales+bank)
+    // RBAC inalterado vs v3: acesso total só admin OU partner; o matches() só
+    // restringe QUAIS docIds passam, não QUEM pode ler/escrever.
     match /conciliacao/{docId} {
-      allow read, write: if isAdmin() || isPartner();
+      allow read, write: if (isAdmin() || isPartner())
+        && docId.matches('^posto1(_meta|_m_[0-9]{4}-[0-9]{2})?$');
     }
 
     // Qualquer outra coleção é negada por padrão (default-deny explícito).
