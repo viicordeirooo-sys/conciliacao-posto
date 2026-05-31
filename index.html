@@ -1109,12 +1109,19 @@ window.doLogout=async function(){
 };
 
 // ─── Tabs ─────────────────────────────────────────────────────────────────────
-window.showTab=function(name,btn){
+window.showTab=async function(name,btn){
   document.querySelectorAll(".tab-btn").forEach(b=>b.classList.remove("active"));
   document.querySelectorAll("[id^='tab-']").forEach(t=>t.style.display="none");
   btn.classList.add("active");
   document.getElementById("tab-"+name).style.display="";
   currentTab=name;
+  if(paginatedMode && (name==="conciliacao" || name==="resumo")){
+    const mes = name==="conciliacao" ? filterMonth : resumoMonth;
+    if(mes){
+      try{ await ensureMonthLoaded(mes); ensureMonthListener(mes); }
+      catch(e){ showAccessError(e); }
+    }
+  }
   renderTab(name);
 };
 
@@ -1220,7 +1227,16 @@ function renderConciliacao(){
 }
 
 window.setFilterStatus=function(s){filterStatus=s;renderConciliacao();}
-window.setFilterMonth=function(m){filterMonth=m;renderConciliacao();}
+window.setFilterMonth=async function(m){
+  filterMonth=m;
+  if(paginatedMode){
+    const sel=document.querySelector("#tab-conciliacao select");
+    if(sel) sel.disabled=true;                 // re-render no fim repõe habilitado
+    try{ await ensureMonthLoaded(m); ensureMonthListener(m); }
+    catch(e){ showAccessError(e); }
+  }
+  renderConciliacao();
+}
 
 function getBadge(status){
   const map={conciliado:["badge-ok","✅ Conciliado"],divergencia:["badge-div","⚠️ Divergência"],atrasado:["badge-late","🚨 Atrasado"],em_aberto:["badge-open","❌ Em Aberto"],a_vencer:["badge-due","⏳ A Vencer"],sem_venda:["badge-nosale","💰 Banco s/ venda"]};
@@ -1264,7 +1280,16 @@ window.setVForm=function(field,value){ vForm[field]=value; renderVendas(); };   
 window.setVAmount=function(value){ vForm.amount=value; updateVendaPreview(); };          // valor: só preview, mantém foco
 window.setEForm=function(field,value){ eForm[field]=value; renderExtrato(); };           // data do crédito
 window.setEFormField=function(field,value){ eForm[field]=value; };                       // descrição/valor: sem re-render
-window.setResumoMonth=function(value){ resumoMonth=value; renderResumo(); };
+window.setResumoMonth=async function(value){
+  resumoMonth=value;
+  if(paginatedMode){
+    const sel=document.querySelector("#tab-resumo select");
+    if(sel) sel.disabled=true;                 // re-render no fim repõe habilitado
+    try{ await ensureMonthLoaded(value); ensureMonthListener(value); }
+    catch(e){ showAccessError(e); }
+  }
+  renderResumo();
+};
 
 function renderVendas(){
   const enriched=STATE.sales.map(enrichSale);
