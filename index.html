@@ -1421,8 +1421,10 @@ window.addSale=function(){
   STATE.sales.unshift({...vForm,id:uid(),amount:Number(vForm.amount),expectedDate:calcDeposit(vForm.date,vForm.modality)});
   vForm.amount="";  // muta (não reatribui) p/ manter o alias window.vForm
   saveToFirebase();
-  showMsg("venda-msg","✅ Adicionado!","ok");
   renderVendas();
+  // showMsg DEPOIS do renderVendas: o render reconstrói #tab-vendas (e o #venda-msg),
+  // então a mensagem de sucesso só sobrevive se escrita após o render (mesmo fix do importPDF).
+  showMsg("venda-msg","✅ Adicionado!","ok");
 };
 
 // PDF importer for PagBank sales report
