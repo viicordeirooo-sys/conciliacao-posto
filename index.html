@@ -1140,21 +1140,27 @@ function renderTab(name){
 function renderConciliacao(){
   const rec=getReconciliation();
   const enriched=STATE.sales.map(enrichSale);
-  const stats={
-    conciliado:rec.filter(r=>r.status==="conciliado").length,
-    divergencia:rec.filter(r=>r.status==="divergencia").length,
-    atrasado:rec.filter(r=>r.status==="atrasado").length,
-    em_aberto:rec.filter(r=>r.status==="em_aberto").length,
-    a_vencer:rec.filter(r=>r.status==="a_vencer").length,
-    sem_venda:rec.filter(r=>r.status==="sem_venda").length,
-    totalBruto:enriched.reduce((a,s)=>a+s.bruto,0),
-    totalMDR:enriched.reduce((a,s)=>a+s.custoMDR,0),
-    totalLiquido:enriched.reduce((a,s)=>a+s.liquido,0),
-    totalBanco:STATE.bank.reduce((a,e)=>a+Number(e.amount),0),
-  };
 
   const months=paginatedMode?availableMonths():[...new Set(rec.map(r=>monthKey(r.date)))].sort().reverse();
   if(!filterMonth&&months.length)filterMonth=months[0];
+
+  // No paginado, cards/alertas refletem SÓ o mês selecionado — o lookback carregado
+  // não pode inflar contagens/totais. months/default ACIMA garantem filterMonth
+  // resolvido antes do recStats (autocontido, sem depender da ordem do boot). No
+  // legado, recStats=rec e os totais usam as fontes globais → byte-idêntico.
+  const recStats=paginatedMode&&filterMonth?rec.filter(r=>monthKey(r.date)===filterMonth):rec;
+  const stats={
+    conciliado:recStats.filter(r=>r.status==="conciliado").length,
+    divergencia:recStats.filter(r=>r.status==="divergencia").length,
+    atrasado:recStats.filter(r=>r.status==="atrasado").length,
+    em_aberto:recStats.filter(r=>r.status==="em_aberto").length,
+    a_vencer:recStats.filter(r=>r.status==="a_vencer").length,
+    sem_venda:recStats.filter(r=>r.status==="sem_venda").length,
+    totalBruto:paginatedMode?recStats.reduce((a,r)=>a+r.bruto,0):enriched.reduce((a,s)=>a+s.bruto,0),
+    totalMDR:paginatedMode?recStats.reduce((a,r)=>a+r.custoMDR,0):enriched.reduce((a,s)=>a+s.custoMDR,0),
+    totalLiquido:paginatedMode?recStats.reduce((a,r)=>a+r.liquido,0):enriched.reduce((a,s)=>a+s.liquido,0),
+    totalBanco:paginatedMode?recStats.reduce((a,r)=>a+r.actual,0):STATE.bank.reduce((a,e)=>a+Number(e.amount),0),
+  };
 
   let filtered=filterStatus==="todos"?rec:rec.filter(r=>r.status===filterStatus);
   if(filterMonth)filtered=filtered.filter(r=>monthKey(r.date)===filterMonth);
