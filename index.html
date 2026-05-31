@@ -700,7 +700,9 @@ async function loadFromFirebase(){
   if(metaSnap.exists()&&metaSnap.data().schemaVersion){
     paginatedMode=true;
     loadMetaIntoState(metaSnap.data());
-    await ensureMonthLoaded(pickActiveMonth(monthsIndex));
+    const active=pickActiveMonth(monthsIndex);
+    filterMonth=resumoMonth=active;   // default casa com o mês carregado
+    await ensureMonthLoaded(active);
     hideAccessError();
     return;
   }
@@ -732,6 +734,17 @@ function pickActiveMonth(index){
   if(index.some(x=>x.mes===cur))return cur;
   const ms=index.map(x=>x.mes).sort();
   return ms.length?ms[ms.length-1]:cur;
+}
+// Meses disponíveis para os dropdowns. No paginado vêm do índice (partição por
+// date); no legado, varre o STATE por date (união vendas∪banco). Os renders usam
+// o padrão dual (paginatedMode?availableMonths():<expressão de hoje>), então o
+// ramo legado daqui fica DORMENTE até a Fase 5.
+function availableMonths(){
+  if(paginatedMode) return monthsIndex.map(x=>x.mes).sort().reverse();
+  const s=new Set();
+  STATE.sales.forEach(x=>{ const k=monthKey(x.date); if(k)s.add(k); });
+  STATE.bank.forEach(x=>{ const k=monthKey(x.date); if(k)s.add(k); });
+  return [...s].sort().reverse();
 }
 // Garante mês + lookback (Fase 0) carregados em STATE (ANEXA aos arrays — não
 // substitui). Mês já em loadedMonths é pulado (cache → sem refetch). Doc inexistente
@@ -1133,7 +1146,7 @@ function renderConciliacao(){
     totalBanco:STATE.bank.reduce((a,e)=>a+Number(e.amount),0),
   };
 
-  const months=[...new Set(rec.map(r=>monthKey(r.date)))].sort().reverse();
+  const months=paginatedMode?availableMonths():[...new Set(rec.map(r=>monthKey(r.date)))].sort().reverse();
   if(!filterMonth&&months.length)filterMonth=months[0];
 
   let filtered=filterStatus==="todos"?rec:rec.filter(r=>r.status===filterStatus);
@@ -1772,7 +1785,7 @@ let resumoMonth="";
 
 function renderResumo(){
   const enriched=STATE.sales.map(enrichSale);
-  const months=[...new Set(enriched.map(s=>monthKey(s.date)))].sort().reverse();
+  const months=paginatedMode?availableMonths():[...new Set(enriched.map(s=>monthKey(s.date)))].sort().reverse();
   if(!resumoMonth&&months.length)resumoMonth=months[0];
 
   const ms=enriched.filter(s=>monthKey(s.date)===resumoMonth);
