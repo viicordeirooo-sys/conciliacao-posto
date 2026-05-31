@@ -1970,9 +1970,10 @@ function renderConfig(){
     </div>
     <div class="card">
       <div class="sec-title">Migração para paginação (1MB)</div>
-      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Operação <strong>única</strong> que reorganiza os dados por mês para não estourar o limite de 1 MB do Firestore. <strong>Exporte um backup (.json) acima ANTES de prosseguir.</strong> Por enquanto só a simulação está disponível — nada é gravado.</p>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Operação <strong>única</strong> que reorganiza os dados por mês para não estourar o limite de 1 MB do Firestore. <strong>Exporte um backup (.json) acima ANTES de prosseguir.</strong> Simule primeiro (dry-run) e confira os números; a execução grava os docs mensais + meta SEM apagar o posto1 legado.</p>
       <div class="btn-row">
         <button class="btn btn-dark" onclick="dryRunBackfill()">🧪 Simular migração (dry-run)</button>
+        <button class="btn btn-dark" onclick="executeBackfill()">▶ Executar migração</button>
         <span id="backfill-msg"></span>
       </div>
       <div id="backfill-preview" style="margin-top:12px"></div>
@@ -2054,6 +2055,54 @@ window.dryRunBackfill=function(){
       <div>Créditos: STATE ${escHtml(t.stateBank)} vs plano ${escHtml(t.planBank)} ${selo(t.bankOk)}</div>
     </div>
     ${semMesAviso}`;
+};
+
+// Fase 4 sub-3: EXECUÇÃO do backfill. Grava docs mensais + meta numa ÚNICA transação
+// (padrão de flushSavePaginated: writes atômicos), com 3 travas antes e releitura de
+// verificação depois. plan.meta NÃO tem schemaVersion → modo paginado segue desligado
+// (cutover = Fase 5). NÃO toca no posto1 legado (coexistência). Idempotente (tx.set
+// substitui o doc inteiro do mês). NÃO muda STATE, NÃO liga paginatedMode. window.*
+// (handler inline). Dados escapados via escHtml().
+window.executeBackfill=async function(){
+  const el=document.getElementById("backfill-preview");
+  const box=(bg,bd,fg,icon,msg)=>{ if(el) el.innerHTML=`<div class="alert-late" style="background:${bg};border-color:${bd};color:${fg};margin-top:12px">${icon} ${msg}</div>`; };
+  const red=(msg)=>box("#1a0010","#e91e8c40","#f48fb1","⛔",msg);
+  const amber=(msg)=>box("#1a1400","#d4a01740","#e6c34a","⚠️",msg);
+  const green=(msg)=>box("#06160c","#1f7a3f","#7be0a3","✅",msg);
+  const plan=window.buildBackfillPlan();
+  const t=plan.totais;
+  // TRAVA 1 — reconciliação STATE vs plano.
+  if(t.salesOk===false||t.bankOk===false){ red("Reconciliação falhou (STATE vs plano divergente). Migração abortada."); return; }
+  // TRAVA 2 — nada a migrar.
+  if(plan.meses.length===0){ amber("Nenhum mês para migrar (banco vazio). Nada a fazer."); return; }
+  // TRAVA 3 — confirmação explícita.
+  const N=plan.meses.length;
+  if(!confirm(`Isto vai gravar ${N} docs mensais + meta no Firestore. O posto1 legado NÃO será apagado. Continuar?`)) return;
+  if(el) el.innerHTML=`<div style="margin-top:12px;color:var(--muted);font-size:12px">⏳ Gravando ${escHtml(N)} mês(es) + meta…</div>`;
+  // GRAVAÇÃO atômica (writes-only numa runTransaction). plan.meta SEM schemaVersion.
+  try{
+    await runTransaction(db,async(tx)=>{
+      for(const m of plan.meses){ tx.set(doc(db,"conciliacao",monthDocId(m.mes)),{sales:m.sales,bank:m.bank}); }
+      tx.set(doc(db,"conciliacao",metaDocId),plan.meta);
+    });
+  }catch(e){
+    console.error("[executeBackfill] falha na transação:",e?.code,e?.message);
+    red(`Falha ao gravar: ${escHtml(e?.message||e?.code||"erro desconhecido")}. Nada confirmado.`);
+    return;
+  }
+  // RELEITURA de verificação: getDoc de cada mês e confere contagens contra o plano.
+  const divergencias=[];
+  for(const m of plan.meses){
+    try{
+      const snap=await getDoc(doc(db,"conciliacao",monthDocId(m.mes)));
+      const d=snap.exists()?snap.data():{};
+      const gs=Array.isArray(d.sales)?d.sales.length:0;
+      const gb=Array.isArray(d.bank)?d.bank.length:0;
+      if(gs!==m.salesCount||gb!==m.bankCount) divergencias.push(`${m.mes}: gravado ${gs}v/${gb}c, esperado ${m.salesCount}v/${m.bankCount}c`);
+    }catch(e){ divergencias.push(`${m.mes}: falha na releitura (${e?.code||e?.message||"erro"})`); }
+  }
+  if(divergencias.length){ red(`Verificação encontrou ${escHtml(divergencias.length)} mês(es) divergente(s): ${escHtml(divergencias.join("; "))}. Confira o Firestore antes de prosseguir.`); return; }
+  green(`Migração concluída: ${escHtml(N)} meses gravados, meta criada (schemaVersion ainda não ligado, modo paginado segue desligado até a Fase 5).`);
 };
 
 // Recongela expectedDate de todas as vendas com a config atual (prazos/feriados).
