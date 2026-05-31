@@ -899,6 +899,38 @@ function writeMetaPayload(remoteMeta,result){
   const months=[...idx.values()].sort((a,b)=>a.mes.localeCompare(b.mes));
   return {schemaVersion:rm.schemaVersion||1,config:STATE.config,mdr:STATE.mdr,months};
 }
+// ── Fase 4 (backfill) — sub-1: plano PURO de partição (sem escrita/UI/Firestore/STATE) ──
+// Lê o STATE legado já carregado e devolve o que SERIA gravado: um balde por mês
+// {sales,bank} + um balde semMes p/ registros com date inválido (monthKey falsy) —
+// NUNCA descartados. O meta sai SEM schemaVersion DE PROPÓSITO: ligar schemaVersion
+// acenderia o modo paginado no boot (~linha 700) e o cutover é a Fase 5, não aqui.
+// Por isso NÃO reusa writeMetaPayload (que força schemaVersion||1). Partição via
+// partitionMonth (reuso, não reimplementa). window.* por causa do uso em handlers
+// inline na sub-2 (gotcha handlers inline em módulo).
+window.buildBackfillPlan=function(){
+  const byMonth=new Map();                                   // mes → {sales:[],bank:[]}
+  const semMes={sales:[],bank:[],salesCount:0,bankCount:0};  // date inválido (monthKey falsy)
+  const bucket=(mes)=>{ if(!byMonth.has(mes))byMonth.set(mes,{sales:[],bank:[]}); return byMonth.get(mes); };
+  (STATE.sales||[]).forEach(s=>{ const m=partitionMonth(s); if(m)bucket(m).sales.push(s); else semMes.sales.push(s); });
+  (STATE.bank||[]).forEach(b=>{ const m=partitionMonth(b); if(m)bucket(m).bank.push(b); else semMes.bank.push(b); });
+  semMes.salesCount=semMes.sales.length;
+  semMes.bankCount=semMes.bank.length;
+  const meses=[...byMonth.entries()]
+    .map(([mes,mm])=>({mes,sales:mm.sales,bank:mm.bank,salesCount:mm.sales.length,bankCount:mm.bank.length}))
+    .sort((a,b)=>a.mes.localeCompare(b.mes));
+  // meta SEM schemaVersion (dormente até a Fase 5).
+  const meta={config:STATE.config,mdr:STATE.mdr,months:meses.map(x=>({mes:x.mes,salesCount:x.salesCount,bankCount:x.bankCount}))};
+  const planSales=meses.reduce((a,x)=>a+x.salesCount,0)+semMes.salesCount;
+  const planBank=meses.reduce((a,x)=>a+x.bankCount,0)+semMes.bankCount;
+  const stateSales=(STATE.sales||[]).length;
+  const stateBank=(STATE.bank||[]).length;
+  return {
+    meses,
+    semMes,
+    meta,
+    totais:{ planSales, planBank, stateSales, stateBank, salesOk:planSales===stateSales, bankOk:planBank===stateBank },
+  };
+};
 // Save paginado: UMA transação multi-doc sobre os meses afetados + meta. Atômica →
 // o move de venda entre meses (delete na origem + add no destino) commita junto.
 async function flushSavePaginated(){
