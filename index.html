@@ -1477,8 +1477,22 @@ window.importPDF=function(input){
       saveToFirebase();
       if(skipped>0) console.warn(`[importPDF] ${skipped} transação(ões) ignorada(s) por falta de data válida.`);
       const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
-      showMsg("venda-msg",`✅ ${news.length} transações importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
       renderVendas();
+      // showMsg DEPOIS do renderVendas: o render reconstrói #tab-vendas (e o #venda-msg),
+      // então a mensagem de sucesso só sobrevive se escrita após o render (corrige o
+      // aviso de sucesso que antes era apagado no mesmo tick).
+      showMsg("venda-msg",`✅ ${news.length} transações importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
+      // AVISO de sanidade (sub-2): registros marcados como suspeitos pelo parser
+      // (bruto ≠ líquido+taxa → possível mudança de layout do PDF). As vendas já
+      // entraram em STATE.sales (sem rejeição, sem mudar a dedupe); aqui só ALERTAMOS.
+      const suspeitos=parsed.suspeitos||[];
+      if(suspeitos.length>0){
+        const lim=suspeitos.slice(0,10);
+        const itens=lim.map(s=>`<div>• ${escHtml(s.date)} — ${fmtBRL(s.amount)} — ${escHtml(s.motivo)}</div>`).join("");
+        const mais=suspeitos.length>10?`<div style="margin-top:4px">(+${suspeitos.length-10} mais)</div>`:"";
+        const pv=document.getElementById("venda-preview");
+        if(pv) pv.innerHTML=`<div class="alert-late" style="background:#1a1400;border-color:#d4a01740;color:#e6c34a">⚠️ <strong>ATENÇÃO: ${suspeitos.length} de ${imported.length} registros têm valores inconsistentes (bruto ≠ líquido+taxa)</strong> — possível mudança no layout do PDF do PagBank. As vendas foram importadas, mas confira o extrato antes de conciliar.<div style="margin-top:8px;font-size:11px;line-height:1.6">${itens}${mais}</div></div>`;
+      }
     }catch(err){
       showMsg("venda-msg","Erro ao ler PDF: "+err.message,"err");
     }
@@ -1545,6 +1559,7 @@ function parsePagBankPDF(text){
   var processed={};
   var sales=[];
   var skipped=0; // candidatos (bruto+taxa+líquido) descartados por falta de data válida
+  var suspeitos=[]; // vendas montadas mas com checagem bruto≈taxa+líquido falha (offsets idx+2/idx+4 podem ter pego número errado)
 
   valIdxs.forEach(function(idx){
     if(processed[idx]) return;
@@ -1581,12 +1596,21 @@ function parsePagBankPDF(text){
       var liquidoReal=Math.max(v2,v4), taxaReal=Math.min(v2,v4);
       if(Math.abs(bruto-(v2+v4))<=0.02 && liquidoReal>=0 && liquidoReal<=bruto){
         sale.liquidoReal=liquidoReal;
+      }else{
+        // Checagem falhou: os valores em idx+2/idx+4 não batem com taxa+líquido do
+        // bruto → o layout do PDF pode ter mudado e os offsets pegaram número errado.
+        // SINALIZA (não mascara) mas NÃO descarta a venda (nunca perder venda).
+        sale._suspeito=true;
+        var motivo=(Math.abs(bruto-(v2+v4))>0.02)
+          ? "bruto != liquido+taxa ("+bruto.toFixed(2)+" vs "+liquidoReal.toFixed(2)+"+"+taxaReal.toFixed(2)+")"
+          : "liquido fora de faixa";
+        suspeitos.push({date:isoDate,idx:idx,amount:bruto,v2:v2,v4:v4,motivo:motivo});
       }
       sales.push(sale);
     }
   });
 
-  return {sales:sales, skipped:skipped};
+  return {sales:sales, skipped:skipped, suspeitos:suspeitos};
 }
 
 
