@@ -1970,10 +1970,11 @@ function renderConfig(){
     </div>
     <div class="card">
       <div class="sec-title">Migração para paginação (1MB)</div>
-      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Operação <strong>única</strong> que reorganiza os dados por mês para não estourar o limite de 1 MB do Firestore. <strong>Exporte um backup (.json) acima ANTES de prosseguir.</strong> Simule primeiro (dry-run) e confira os números; a execução grava os docs mensais + meta SEM apagar o posto1 legado.</p>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Operação <strong>única</strong> que reorganiza os dados por mês para não estourar o limite de 1 MB do Firestore. Fluxo: <strong>Exportar Backup (.json)</strong> acima → <strong>Simular (dry-run)</strong> e conferir os números → <strong>Executar migração</strong> → <strong>Ativar modo paginado (cutover)</strong>. Nada é apagado — o posto1 legado fica como fallback.</p>
       <div class="btn-row">
         <button class="btn btn-dark" onclick="dryRunBackfill()">🧪 Simular migração (dry-run)</button>
         <button class="btn btn-dark" onclick="executeBackfill()">▶ Executar migração</button>
+        <button class="btn btn-dark" onclick="activatePaginatedMode()">🔀 Ativar modo paginado (cutover)</button>
         <span id="backfill-msg"></span>
       </div>
       <div id="backfill-preview" style="margin-top:12px"></div>
@@ -2103,6 +2104,47 @@ window.executeBackfill=async function(){
   }
   if(divergencias.length){ red(`Verificação encontrou ${escHtml(divergencias.length)} mês(es) divergente(s): ${escHtml(divergencias.join("; "))}. Confira o Firestore antes de prosseguir.`); return; }
   green(`Migração concluída: ${escHtml(N)} meses gravados, meta criada (schemaVersion ainda não ligado, modo paginado segue desligado até a Fase 5).`);
+};
+
+// Fase 5 (cutover): liga o modo paginado gravando schemaVersion:1 no posto1_meta.
+// Protegido: só funciona se a Fase 4 real já rodou (meta existe c/ meses) e ainda
+// não está ativo. Só toca o posto1_meta — NÃO toca posto1 legado nem posto1_m_*.
+// Reversível (não apaga nada; remover o legado é a Fase 6). schemaVersion:1 fixo.
+// NÃO força reload, NÃO muda STATE nem paginatedMode em memória — só vale no próximo
+// boot. window.* (handler inline). Dados escapados via escHtml().
+window.activatePaginatedMode=async function(){
+  const el=document.getElementById("backfill-preview");
+  const box=(bg,bd,fg,icon,msg)=>{ if(el) el.innerHTML=`<div class="alert-late" style="background:${bg};border-color:${bd};color:${fg};margin-top:12px">${icon} ${msg}</div>`; };
+  const red=(msg)=>box("#1a0010","#e91e8c40","#f48fb1","⛔",msg);
+  const amber=(msg)=>box("#1a1400","#d4a01740","#e6c34a","⚠️",msg);
+  const green=(msg)=>box("#06160c","#1f7a3f","#7be0a3","✅",msg);
+  const metaRef=doc(db,"conciliacao",metaDocId);
+  // a. Lê o meta.
+  let snap;
+  try{ snap=await getDoc(metaRef); }
+  catch(e){ red(`Falha ao ler meta: ${escHtml(e?.message||e?.code||"erro desconhecido")}.`); return; }
+  // TRAVA A — meta não existe.
+  if(!snap.exists()){ red("posto1_meta não encontrado. Rode a migração (Executar migração) primeiro."); return; }
+  const meta=snap.data();
+  // TRAVA B — sem meses.
+  if(!Array.isArray(meta.months)||meta.months.length===0){ red("Meta sem meses. Migração incompleta ou banco vazio."); return; }
+  // TRAVA C — já ativo.
+  if(meta.schemaVersion){ amber(`Modo paginado já está ativo (schemaVersion=${escHtml(meta.schemaVersion)}). Nada a fazer.`); return; }
+  // TRAVA D — confirmação.
+  if(!confirm("Isto ativa o modo paginado no próximo carregamento. O app passará a ler os dados por mês; o posto1 legado vira fallback. Confirma?")) return;
+  // GRAVAÇÃO: relê o meta na transação e regrava o objeto inteiro + schemaVersion:1.
+  try{
+    await runTransaction(db,async(tx)=>{
+      const s=await tx.get(metaRef);
+      const cur=s.exists()?s.data():{};
+      tx.set(metaRef,{...cur,schemaVersion:1});
+    });
+  }catch(e){
+    console.error("[activatePaginatedMode] falha:",e?.code,e?.message);
+    red(`Falha ao ativar: ${escHtml(e?.message||e?.code||"erro desconhecido")}. Nada mudou.`);
+    return;
+  }
+  green("Modo paginado ATIVADO (schemaVersion=1). RECARREGUE a página para o app entrar no modo paginado. O posto1 legado continua intacto como fallback.");
 };
 
 // Recongela expectedDate de todas as vendas com a config atual (prazos/feriados).
