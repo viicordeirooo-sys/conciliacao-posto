@@ -32,6 +32,49 @@ service cloud.firestore {
     function isAdmin()   { return role() == "admin"; }
     function isPartner() { return role() == "partner"; }
 
+    // ─── Validação de ENVELOPE (defesa em profundidade, v5) ──────────────────────
+    // Validam só a FORMA do topo do doc: chaves permitidas (hasOnly), chaves
+    // obrigatórias (hasAll), tipos (is list / is map) e um teto de tamanho nos
+    // arrays. NÃO validam o conteúdo de cada item dos arrays — Rules não iteram
+    // listas de tamanho arbitrário; a validação por-registro continua no cliente
+    // (normSale/normBank). Recebem `d` = request.resource.data.
+    //
+    // PREMISSA: toda gravação envia o doc INTEIRO (tx.set), nunca update parcial
+    // de campo isolado. O hasAll depende disso. Se algum dia entrar updateDoc/merge
+    // parcial de um campo só, estas funções QUEBRAM (hasAll falha) — revisar antes.
+
+    // Doc LEGADO (posto1): topo = {sales, bank, mdr, config}. Os 4 obrigatórios.
+    function isValidLegacyDoc(d) {
+      return d.keys().hasOnly(['sales','bank','mdr','config'])
+        && d.keys().hasAll(['sales','bank','mdr','config'])
+        && d.sales is list && d.sales.size() <= 10000
+        && d.bank  is list && d.bank.size()  <= 10000
+        && d.mdr    is map
+        && d.config is map;
+    }
+
+    // Doc MÊS (posto1_m_YYYY-MM): topo = SÓ {sales, bank}. Sem mdr/config.
+    function isValidMonthDoc(d) {
+      return d.keys().hasOnly(['sales','bank'])
+        && d.keys().hasAll(['sales','bank'])
+        && d.sales is list && d.sales.size() <= 10000
+        && d.bank  is list && d.bank.size()  <= 10000;
+    }
+
+    // Doc META (posto1_meta): topo = {config, mdr, months} + schemaVersion OPCIONAL.
+    // Backfill (Fase 4) grava SEM schemaVersion; cutover (Fase 5) grava COM. Por isso
+    // schemaVersion entra no hasOnly mas NÃO no hasAll. Se presente, exigimos que seja
+    // número (int OU float — Rules não tem `is number`).
+    function isValidMeta(d) {
+      return d.keys().hasOnly(['config','mdr','months','schemaVersion'])
+        && d.keys().hasAll(['config','mdr','months'])
+        && d.config is map
+        && d.mdr    is map
+        && d.months is list && d.months.size() <= 240
+        && ( !('schemaVersion' in d.keys())
+             || d.schemaVersion is int || d.schemaVersion is float );
+    }
+
     // Dados do app na coleção 'conciliacao'. Hardening (v4): além do RBAC,
     // o docId precisa ser um id LEGÍTIMO (defesa em profundidade — impede que
     // uma conta autorizada crie/leia docs arbitrários na coleção).
@@ -41,8 +84,29 @@ service cloud.firestore {
     // RBAC inalterado vs v3: acesso total só admin OU partner; o matches() só
     // restringe QUAIS docIds passam, não QUEM pode ler/escrever.
     match /conciliacao/{docId} {
-      allow read, write: if (isAdmin() || isPartner())
-        && docId.matches('^posto1(_meta|_m_[0-9]{4}-[0-9]{2})?$');
+      // QUEM pode (RBAC, inalterado vs v3/v4) e QUAIS docIds são legítimos (v4).
+      function authed()     { return isAdmin() || isPartner(); }
+      function validDocId() { return docId.matches('^posto1(_meta|_m_[0-9]{4}-[0-9]{2})?$'); }
+
+      // Roteia o validador de envelope pela FORMA do docId. Definida aqui dentro
+      // porque referencia `docId`. Qualquer docId fora das 3 formas → false (mas o
+      // validDocId() já barraria antes; isto é só fail-safe).
+      function envelopeOk() {
+        return docId == 'posto1'      ? isValidLegacyDoc(request.resource.data)
+             : docId == 'posto1_meta' ? isValidMeta(request.resource.data)
+             : docId.matches('^posto1_m_[0-9]{4}-[0-9]{2}$')
+                                       ? isValidMonthDoc(request.resource.data)
+             : false;
+      }
+
+      // read e delete: INALTERADOS (RBAC + docId legítimo; sem request.resource.data
+      // no delete, então não há envelope a validar).
+      allow read:   if authed() && validDocId();
+      allow delete: if authed() && validDocId();
+
+      // create e update: além de tudo acima, o envelope do payload precisa bater
+      // com a forma do doc (chaves/tipos/tamanho do topo).
+      allow create, update: if authed() && validDocId() && envelopeOk();
     }
 
     // Qualquer outra coleção é negada por padrão (default-deny explícito).
