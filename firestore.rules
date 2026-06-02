@@ -109,6 +109,19 @@ service cloud.firestore {
       allow create, update: if authed() && validDocId() && envelopeOk();
     }
 
+    // Trilha de auditoria (Nível 1) — append-only DE VERDADE: cria-se, nunca se
+    // edita/apaga (nem admin). Leitura só admin. ts travado em request.time
+    // (serverTimestamp) impede backdating; uid travado em request.auth.uid impede
+    // forjar identidade de outro usuário. hasOnly = só envelope (sem validar summary).
+    match /audit_log/{logId} {
+      allow create: if (isAdmin() || isPartner())
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.ts == request.time
+        && request.resource.data.keys().hasOnly(['ts','action','target','uid','email','role','summary']);
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
     // Qualquer outra coleção é negada por padrão (default-deny explícito).
     match /{document=**} {
       allow read, write: if false;

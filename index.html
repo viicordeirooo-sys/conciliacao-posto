@@ -292,7 +292,7 @@ tr:hover td{background:#0a1628}
 <!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
-import { getFirestore, doc, onSnapshot, getDoc, runTransaction } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+import { getFirestore, doc, onSnapshot, getDoc, runTransaction, collection, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 
 const firebaseConfig = {
@@ -307,6 +307,9 @@ const firebaseConfig = {
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 const auth = getAuth(fbApp);
+// Role (claim admin/partner) do usuário logado, capturado no onAuthStateChanged.
+// Lido de forma síncrona pelo logAudit (trilha de auditoria). null quando deslogado.
+let _currentRole = null;
 
 // ─── Segurança: Pré-requisitos Firebase ──────────────────────────────────────
 // 1. Firebase Console → Authentication → Sign-in method → E-mail/senha → Ativar
@@ -976,6 +979,8 @@ async function flushSavePaginated(){
   }else{
     setSyncStatus("saved");
   }
+  // Trilha de auditoria (best-effort, fora da tx): registra o save paginado.
+  logAudit("save_paginated","posto1_meta+meses",{monthsCount:result.size,salesTotal:STATE.sales.length,bankTotal:STATE.bank.length});
 }
 
 async function flushSave(){
@@ -1010,6 +1015,8 @@ async function flushSave(){
     }else{
       setSyncStatus("saved");
     }
+    // Trilha de auditoria (best-effort, fora da tx): registra o save legado.
+    logAudit("save_legacy","posto1",{salesCount:STATE.sales.length,bankCount:STATE.bank.length,docKB:Math.round(bytes/1024)});
   }catch(e){
     _savePending=true;
     console.error("[saveToFirebase] falha ao gravar:",e?.code,e?.message,e);
@@ -1029,12 +1036,31 @@ window.retrySave=function(){
   flushSave();
 };
 
+// ─── Trilha de auditoria (Nível 1, append-only) ───────────────────────────────
+// Best-effort: grava UM doc em audit_log por evento de escrita financeira. SEPARADO
+// das transações (fora do tx) e embrulhado em try/catch que SÓ faz console.warn —
+// uma falha de log NUNCA pode derrubar a gravação. ts = serverTimestamp() (servidor).
+async function logAudit(action, target, summary){
+  try{
+    await addDoc(collection(db,"audit_log"),{
+      ts: serverTimestamp(),
+      action, target,
+      uid: auth.currentUser?.uid,
+      email: auth.currentUser?.email || null,
+      role: _currentRole || null,
+      summary: summary || {},
+    });
+  }catch(e){ console.warn("[audit] falha ao registrar (ignorada):", e?.code||e?.message); }
+}
+
 // ─── Auth state ───────────────────────────────────────────────────────────────
 let unsubscribeSnapshot=null;
 
 onAuthStateChanged(auth,async(user)=>{
   if(user){
     clearLoginState();
+    // Captura o role (claim) p/ a trilha de auditoria, sem travar o fluxo de login.
+    user.getIdTokenResult().then(r=>{ _currentRole=r.claims.role||null; }).catch(()=>{ _currentRole=null; });
     document.getElementById("login-screen").style.display="none";
     document.getElementById("app").style.display="block";
     document.getElementById("login-email").value="";
@@ -1084,6 +1110,7 @@ onAuthStateChanged(auth,async(user)=>{
       document.addEventListener(ev,resetSessionTimer,{passive:true});
     });
   }else{
+    _currentRole=null;
     document.getElementById("app").style.display="none";
     document.getElementById("login-screen").style.display="flex";
     if(unsubscribeSnapshot){ unsubscribeSnapshot(); unsubscribeSnapshot=null; }
@@ -2129,6 +2156,8 @@ window.executeBackfill=async function(){
     }catch(e){ divergencias.push(`${m.mes}: falha na releitura (${e?.code||e?.message||"erro"})`); }
   }
   if(divergencias.length){ red(`Verificação encontrou ${escHtml(divergencias.length)} mês(es) divergente(s): ${escHtml(divergencias.join("; "))}. Confira o Firestore antes de prosseguir.`); return; }
+  // Trilha de auditoria (best-effort, fora da tx): registra o backfill.
+  logAudit("backfill","posto1_meta+meses",{monthsCount:N,salesTotal:t.planSales,bankTotal:t.planBank});
   green(`Migração concluída: ${escHtml(N)} meses gravados, meta criada (schemaVersion ainda não ligado, modo paginado segue desligado até a Fase 5).`);
 };
 
@@ -2170,6 +2199,8 @@ window.activatePaginatedMode=async function(){
     red(`Falha ao ativar: ${escHtml(e?.message||e?.code||"erro desconhecido")}. Nada mudou.`);
     return;
   }
+  // Trilha de auditoria (best-effort, fora da tx): registra o cutover.
+  logAudit("cutover","posto1_meta",{schemaVersion:1});
   green("Modo paginado ATIVADO (schemaVersion=1). RECARREGUE a página para o app entrar no modo paginado. O posto1 legado continua intacto como fallback.");
 };
 
