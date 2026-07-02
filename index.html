@@ -1224,6 +1224,9 @@ function renderConciliacao(){
   let filtered=filterStatus==="todos"?rec:rec.filter(r=>r.status===filterStatus);
   if(filterMonth)filtered=filtered.filter(r=>monthKey(r.date)===filterMonth);
 
+  const alertDiv=stats.divergencia>0?`
+    <div class="alert-late" style="background:#3a2800;border-color:#f0a50040;color:#f0a500">⚠️ <strong>${stats.divergencia} dia${stats.divergencia>1?"s":""} com divergência</strong> — o valor recebido não bate com o esperado. Confira na tabela.</div>
+  `:"";
   const alertHtml=stats.atrasado>0?`
     <div class="alert-late">🚨 <strong>${stats.atrasado} depósito${stats.atrasado>1?"s":""} em atraso</strong> — a data passou e o valor não entrou no banco. Verifique com a adquirente.</div>
   `:"";
@@ -1255,6 +1258,7 @@ function renderConciliacao(){
   }).join("");
 
   document.getElementById("tab-conciliacao").innerHTML=`
+    ${alertDiv}
     ${alertHtml}
     ${alertNoSale}
     <div class="stats-row">
