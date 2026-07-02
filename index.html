@@ -1945,6 +1945,44 @@ function renderResumo(){
 
   const monthOpts=months.map(m=>`<option value="${m}"${resumoMonth===m?"selected":""}>${monthLabel(m)}</option>`).join("");
 
+  // MDR consolidado — mesma lógica de pb, mas sobre TODAS as vendas carregadas em
+  // memória (enriched), não só o mês. Fonte-chave da taxa efetiva p/ renegociação.
+  // loadedMonths reflete os meses REALMENTE presentes em STATE.sales (no paginado
+  // só os do lookback); availableMonths()/months listaria o índice inteiro.
+  const loadedMonths=[...new Set(enriched.map(s=>monthKey(s.date)))];
+  const pbAll={};
+  let realCount=0;
+  enriched.forEach(s=>{
+    if(!pbAll[s.bandeira])pbAll[s.bandeira]={bruto:0,mdr:0,liquido:0,count:0};
+    pbAll[s.bandeira].bruto+=s.bruto;pbAll[s.bandeira].mdr+=s.custoMDR;
+    pbAll[s.bandeira].liquido+=s.liquido;pbAll[s.bandeira].count++;
+    if(s.taxaSource==="real")realCount++;
+  });
+  const totBrutoAll=enriched.reduce((a,s)=>a+s.bruto,0);
+  const totMdrAll=enriched.reduce((a,s)=>a+s.custoMDR,0);
+  const totLiqAll=enriched.reduce((a,s)=>a+s.liquido,0);
+  const taxaEfAll=totBrutoAll>0?totMdrAll/totBrutoAll:0;
+  const consRows=Object.entries(pbAll).sort((a,b)=>b[1].bruto-a[1].bruto).map(([b,v])=>`<tr>
+    <td style="font-weight:700">${escHtml(b)}</td>
+    <td>${v.count}</td>
+    <td style="color:var(--purple)">${fmtBRL(v.bruto)}</td>
+    <td style="color:var(--red);font-size:11px">${fmtBRL(v.mdr)}</td>
+    <td style="color:var(--green);font-weight:600">${fmtBRL(v.liquido)}</td>
+    <td style="color:var(--muted);font-size:11px">${v.bruto>0?pct(v.mdr/v.bruto*100):"0.00%"}</td>
+  </tr>`).join("");
+  const consTotalRow=`<tr style="border-top:2px solid var(--border)">
+    <td style="font-weight:800">TOTAL</td>
+    <td style="font-weight:800">${enriched.length}</td>
+    <td style="color:var(--purple);font-weight:800">${fmtBRL(totBrutoAll)}</td>
+    <td style="color:var(--red);font-weight:800">${fmtBRL(totMdrAll)}</td>
+    <td style="color:var(--green);font-weight:800">${fmtBRL(totLiqAll)}</td>
+    <td style="color:var(--accent);font-weight:800">${totBrutoAll>0?pct(taxaEfAll*100):"0.00%"}</td>
+  </tr>`;
+  const consAviso=paginatedMode?`
+    <div class="alert-late" style="background:#3a2800;border-color:#f0a50040;color:#f0a500">⚠️ <strong>Modo paginado ativo</strong> — consolidado cobre apenas os ${loadedMonths.length} mês(es) carregado(s) em memória. Para a visão completa, navegue pelos meses no filtro acima (cada um fica em cache) ou use Exportar Backup na Config.</div>
+  `:"";
+  const realNote=realCount>0?`<div class="stat-sub" style="margin-top:8px">Base do MDR: ${realCount} de ${enriched.length} vendas com líquido real do extrato; as demais estimadas pela taxa configurada.</div>`:"";
+
   document.getElementById("tab-resumo").innerHTML=`
     <div class="card" style="padding:12px 16px;margin-bottom:14px">
       <div style="display:flex;gap:10px;align-items:center">
@@ -1971,6 +2009,18 @@ function renderResumo(){
           <tbody>${bandRows}</tbody>
         </table>
       </div>`}
+    </div>
+    <div class="card">
+      <div class="sec-title">MDR Consolidado — todos os meses carregados</div>
+      ${consAviso}
+      ${enriched.length===0?`<div class="empty">Sem vendas carregadas.</div>`:`
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Bandeira</th><th>Qtd</th><th>Bruto</th><th>MDR</th><th>Líquido</th><th>Taxa Ef.</th></tr></thead>
+          <tbody>${consRows}${consTotalRow}</tbody>
+        </table>
+      </div>
+      ${realNote}`}
     </div>
     <div class="card">
       <div class="sec-title">Status de Conciliação — ${monthLabel(resumoMonth)}</div>
