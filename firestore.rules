@@ -1,15 +1,20 @@
 rules_version = '2';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Regras do Firestore — app de conciliação de posto único (conciliacao/posto1).
+// Regras do Firestore — app de conciliação de posto (coleção `conciliacao`).
 //
 // Histórico de versões:
 //   v1 — open: acesso liberado (sem autenticação).            [legado]
 //   v2 — auth-wildcard: allow read, write: if request.auth != null
 //        (qualquer usuário autenticado lia/escrevia).          [anterior]
-//   v3 — RBAC (esta): acesso só para usuários com custom claim
-//        role == "admin" ou role == "partner". Ambos os papéis
-//        têm acesso total (read/write/delete). Sem role válido → negado.
+//   v3 — RBAC: acesso só para usuários com custom claim role == "admin"
+//        ou "partner". Ambos com acesso total. Sem role válido → negado.
+//   v4 — validDocId: só docIds legítimos (posto1 / _meta / _m_).
+//   v5 — envelope: valida forma do topo de cada doc (hasOnly/hasAll/tipos).
+//   v6 — paginação DIÁRIA + multi-posto (esta): docId genérico posto[0-9]+
+//        (aceita posto1, posto2, …); novo doc-dia postoN_d_YYYY-MM-DD com
+//        isValidDayDoc; meta passa a indexar DIAS (isValidMeta {config,mdr,days},
+//        teto 4000); doc-mês (_m_) MANTIDO só durante a transição mês→dia.
 //
 // Modelo de papéis:
 //   - "admin"   → acesso total à coleção `conciliacao`.
@@ -53,7 +58,9 @@ service cloud.firestore {
         && d.config is map;
     }
 
-    // Doc MÊS (posto1_m_YYYY-MM): topo = SÓ {sales, bank}. Sem mdr/config.
+    // Doc MÊS (postoN_m_YYYY-MM): topo = SÓ {sales, bank}. Sem mdr/config.
+    // MANTIDO durante a transição mês→dia (a migração lê os _m_ antigos; remover só
+    // no aperto final das rules, depois que os day-docs estiverem sólidos).
     function isValidMonthDoc(d) {
       return d.keys().hasOnly(['sales','bank'])
         && d.keys().hasAll(['sales','bank'])
@@ -61,16 +68,26 @@ service cloud.firestore {
         && d.bank  is list && d.bank.size()  <= 10000;
     }
 
-    // Doc META (posto1_meta): topo = {config, mdr, months} + schemaVersion OPCIONAL.
-    // Backfill (Fase 4) grava SEM schemaVersion; cutover (Fase 5) grava COM. Por isso
-    // schemaVersion entra no hasOnly mas NÃO no hasAll. Se presente, exigimos que seja
-    // número (int OU float — Rules não tem `is number`).
+    // Doc DIA (postoN_d_YYYY-MM-DD): topo = SÓ {sales, bank} — mesma forma do doc-mês.
+    // Um dia real tem ~768 registros; teto 10000 é folga sã contra payload absurdo.
+    function isValidDayDoc(d) {
+      return d.keys().hasOnly(['sales','bank'])
+        && d.keys().hasAll(['sales','bank'])
+        && d.sales is list && d.sales.size() <= 10000
+        && d.bank  is list && d.bank.size()  <= 10000;
+    }
+
+    // Doc META (postoN_meta): topo = {config, mdr, days} + schemaVersion OPCIONAL.
+    // O índice agora é por DIA (days:[{dia,salesCount,bankCount}]). schemaVersion entra
+    // no hasOnly mas NÃO no hasAll (backfill grava sem; save/migração gravam com). Se
+    // presente, exigimos número (int OU float — Rules não tem `is number`). Teto 4000
+    // dias (~15 anos de operação) — o antigo 240 cobria só ~<1 ano de meses.
     function isValidMeta(d) {
-      return d.keys().hasOnly(['config','mdr','months','schemaVersion'])
-        && d.keys().hasAll(['config','mdr','months'])
+      return d.keys().hasOnly(['config','mdr','days','schemaVersion'])
+        && d.keys().hasAll(['config','mdr','days'])
         && d.config is map
         && d.mdr    is map
-        && d.months is list && d.months.size() <= 240
+        && d.days is list && d.days.size() <= 4000
         && ( !('schemaVersion' in d.keys())
              || d.schemaVersion is int || d.schemaVersion is float );
     }
@@ -78,24 +95,27 @@ service cloud.firestore {
     // Dados do app na coleção 'conciliacao'. Hardening (v4): além do RBAC,
     // o docId precisa ser um id LEGÍTIMO (defesa em profundidade — impede que
     // uma conta autorizada crie/leia docs arbitrários na coleção).
-    //   posto1            → doc legado (single-doc; mantido p/ rollback)
-    //   posto1_meta       → config/mdr + índice de meses (modelo paginado)
-    //   posto1_m_YYYY-MM  → dados de um mês (sales+bank)
-    // RBAC inalterado vs v3: acesso total só admin OU partner; o matches() só
-    // restringe QUAIS docIds passam, não QUEM pode ler/escrever.
+    //   postoN               → doc legado (single-doc; mantido p/ rollback)
+    //   postoN_meta          → config/mdr + índice de DIAS (modelo paginado diário)
+    //   postoN_d_YYYY-MM-DD  → dados de um DIA (sales+bank)  [modelo atual]
+    //   postoN_m_YYYY-MM     → dados de um mês (sales+bank)  [legado da paginação; só na transição]
+    // MULTI-POSTO: a regex passou de `posto1` fixo para `posto[0-9]+` genérico —
+    // aceita posto1, posto2, … desde já (o app ainda é mono-posto; isto só libera
+    // QUAIS docIds passam, o RBAC continua igual). Transição mês→dia: aceita _d_ E _m_.
+    // RBAC inalterado vs v3: acesso total só admin OU partner.
     match /conciliacao/{docId} {
-      // QUEM pode (RBAC, inalterado vs v3/v4) e QUAIS docIds são legítimos (v4).
+      // QUEM pode (RBAC, inalterado vs v3/v4) e QUAIS docIds são legítimos (v4/multi-posto).
       function authed()     { return isAdmin() || isPartner(); }
-      function validDocId() { return docId.matches('^posto1(_meta|_m_[0-9]{4}-[0-9]{2})?$'); }
+      function validDocId() { return docId.matches('^posto[0-9]+(_meta|_d_[0-9]{4}-[0-9]{2}-[0-9]{2}|_m_[0-9]{4}-[0-9]{2})?$'); }
 
       // Roteia o validador de envelope pela FORMA do docId. Definida aqui dentro
-      // porque referencia `docId`. Qualquer docId fora das 3 formas → false (mas o
+      // porque referencia `docId`. Qualquer docId fora das formas → false (mas o
       // validDocId() já barraria antes; isto é só fail-safe).
       function envelopeOk() {
-        return docId == 'posto1'      ? isValidLegacyDoc(request.resource.data)
-             : docId == 'posto1_meta' ? isValidMeta(request.resource.data)
-             : docId.matches('^posto1_m_[0-9]{4}-[0-9]{2}$')
-                                       ? isValidMonthDoc(request.resource.data)
+        return docId.matches('^posto[0-9]+$')                              ? isValidLegacyDoc(request.resource.data)
+             : docId.matches('^posto[0-9]+_meta$')                         ? isValidMeta(request.resource.data)
+             : docId.matches('^posto[0-9]+_d_[0-9]{4}-[0-9]{2}-[0-9]{2}$') ? isValidDayDoc(request.resource.data)
+             : docId.matches('^posto[0-9]+_m_[0-9]{4}-[0-9]{2}$')          ? isValidMonthDoc(request.resource.data)
              : false;
       }
 
