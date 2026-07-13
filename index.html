@@ -190,6 +190,7 @@ tr:hover td{background:#0a1628}
 .match-item .mi-l{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .match-item .mi-r{font-weight:600;color:var(--text);white-space:nowrap}
 .match-ok{border-left-color:var(--green)}
+.match-tol{border-left-color:var(--accent);background:#f0a50014}
 .match-orphan-sale{border-left-color:var(--red);background:#e74c3c14}
 .match-orphan-bank{border-left-color:var(--purple);background:#9b59b614}
 .match-diff{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;background:#3a2800;color:var(--accent);margin-left:6px}
@@ -1409,7 +1410,9 @@ function matchDayItems(r){
     for(let j=0;j<credits.length;j++){
       if(!used[j]&&Math.abs(credits[j].amount-s.liquido)<=tol){ hit=j; break; }
     }
-    if(hit>=0){ used[hit]=true; pairs.push({sale:s,credit:credits[hit],diff:round2(credits[hit].amount-s.liquido)}); }
+    // diff a 4 casas: elimina o resíduo de float da subtração de 2 casas
+    // (4.11-4.10=0.00999…) sem esconder diferença sub-centavo genuína (ponto 3).
+    if(hit>=0){ used[hit]=true; pairs.push({sale:s,credit:credits[hit],diff:Math.round((credits[hit].amount-s.liquido)*1e4)/1e4}); }
     else salesOnly.push(s);
   });
   const creditsOnly=credits.filter((_,j)=>!used[j]);
@@ -1422,20 +1425,39 @@ function dayDetailHtml(r){
   const diffColor=Math.abs(r.diff)<.01?"var(--muted)":r.diff>0?"var(--accent)":"var(--red)";
   const diffStr=(r.diff>=0?"+":"")+fmtBRL(r.diff);
 
-  // Coluna Vendas: pareadas (✓, chip da dif. se ≠0) primeiro, órfãs (⚠) depois.
+  // Culpado = par dentro da tolerância mas com diferença (|diff|>=0.01). Vem
+  // PRIMEIRO; verde fica só p/ diff zero. Reordena m.pairs uma vez p/ manter as
+  // duas colunas alinhadas (par i na esquerda = par i na direita).
+  const isTol=p=>Math.abs(p.diff)>=.01;
+  const orderedPairs=[...m.pairs.filter(isTol),...m.pairs.filter(p=>!isTol(p))];
+  const sumPairDiff=round2(m.pairs.reduce((a,p)=>a+p.diff,0));
+
+  // Coluna Vendas: culpados (âmbar ≈, chip da dif.) → verdes (✓) → órfãs (⚠).
   const saleItems=[
-    ...m.pairs.map(p=>{
-      const chip=Math.abs(p.diff)>=.01?`<span class="match-diff">${p.diff>0?"+":""}${fmtBRL(p.diff)}</span>`:"";
-      return `<div class="match-item match-ok"><span class="mi-l">✓ ${escHtml(p.sale.bandeira)} · ${escHtml(p.sale.modality)}</span><span class="mi-r">${fmtBRL(p.sale.liquido)}${chip}</span></div>`;
+    ...orderedPairs.map(p=>{
+      const cls=isTol(p)?"match-tol":"match-ok", mark=isTol(p)?"≈":"✓";
+      const chip=isTol(p)?`<span class="match-diff">${p.diff>0?"+":""}${fmtBRL(p.diff)}</span>`:"";
+      return `<div class="match-item ${cls}"><span class="mi-l">${mark} ${escHtml(p.sale.bandeira)} · ${escHtml(p.sale.modality)}</span><span class="mi-r">${fmtBRL(p.sale.liquido)}${chip}</span></div>`;
     }),
     ...m.salesOnly.map(s=>`<div class="match-item match-orphan-sale"><span class="mi-l">⚠ ${escHtml(s.bandeira)} · ${escHtml(s.modality)} — sem crédito</span><span class="mi-r" style="color:var(--red)">${fmtBRL(s.liquido)}</span></div>`),
   ].join("")||`<div class="detail-empty">Nenhuma venda neste dia.</div>`;
 
-  // Coluna Créditos: pareados (✓) primeiro, órfãos (⚠) depois.
+  // Coluna Créditos: mesma ordem dos pares (alinha com Vendas) → órfãos (⚠).
   const bankItems=[
-    ...m.pairs.map(p=>`<div class="match-item match-ok"><span class="mi-l">✓ ${escHtml(p.credit.description)||"—"}</span><span class="mi-r">${fmtBRL(p.credit.amount)}</span></div>`),
+    ...orderedPairs.map(p=>{
+      const cls=isTol(p)?"match-tol":"match-ok", mark=isTol(p)?"≈":"✓";
+      return `<div class="match-item ${cls}"><span class="mi-l">${mark} ${escHtml(p.credit.description)||"—"}</span><span class="mi-r">${fmtBRL(p.credit.amount)}</span></div>`;
+    }),
     ...m.creditsOnly.map(c=>`<div class="match-item match-orphan-bank"><span class="mi-l">⚠ ${escHtml(c.description)||"—"} — sem venda</span><span class="mi-r" style="color:var(--purple)">${fmtBRL(c.amount)}</span></div>`),
   ].join("")||`<div class="detail-empty">Nenhum crédito no banco neste dia.</div>`;
+
+  // Nota sub-centavo: dia divergente, nenhum culpado >=1¢ e sem órfãos → a
+  // diferença do dia é só acúmulo de arredondamentos sub-centavo dos pares.
+  const subCent=m.pairs.filter(p=>p.diff!==0).length;
+  const noteHtml=(r.status==="divergencia"&&!m.pairs.some(isTol)&&!m.salesOnly.length&&!m.creditsOnly.length)
+    ?`<div class="detail-legend" style="color:var(--accent)">ℹ️ Diferença distribuída em arredondamentos sub-centavo de ${subCent} itens.</div>`:"";
+
+  const sumColor=Math.abs(sumPairDiff)<.01?"var(--muted)":sumPairDiff>0?"var(--accent)":"var(--red)";
 
   return `<div class="detail-panel">
     <div class="detail-head">
@@ -1443,6 +1465,7 @@ function dayDetailHtml(r){
       <span>Líquido esperado: <strong style="color:var(--green)">${fmtBRL(r.liquido)}</strong></span>
       <span>Banco: <strong style="color:var(--blue)">${fmtBRL(r.actual)}</strong></span>
       <span>Diferença: <strong style="color:${diffColor}">${diffStr}</strong></span>
+      <span>Σ diferenças dos pares: <strong style="color:${sumColor}">${sumPairDiff>=0?"+":""}${fmtBRL(sumPairDiff)}</strong></span>
     </div>
     <div class="detail-cols">
       <div class="detail-col">
@@ -1456,7 +1479,8 @@ function dayDetailHtml(r){
         <div class="detail-tot"><span>Total banco</span><span style="color:var(--blue)">${fmtBRL(r.actual)}</span></div>
       </div>
     </div>
-    <div class="detail-legend">✓ valor encontrado no banco (tolerância ${fmtBRL(m.tol)}) · ⚠ sem correspondência — o valor à direita é a diferença exata que não bateu.</div>
+    ${noteHtml}
+    <div class="detail-legend">✓ igual · ≈ dentro da tolerância (${fmtBRL(m.tol)}) mas com diferença — o chip mostra quanto · ⚠ sem correspondência — o valor à direita é a diferença exata que não bateu.</div>
   </div>`;
 }
 
