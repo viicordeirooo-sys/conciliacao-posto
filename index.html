@@ -892,10 +892,16 @@ function availableMonths(){
 // em _baselineByDay (isolado do _baseline* legado).
 async function ensureMonthLoaded(mes){
   const needed=daysOfMonthToLoad(mes);
+  // Dias ainda não carregados, na ordem original e sem duplicatas (mesmo skip do
+  // loop antigo: pula loadedDays e não reprocessa dia repetido no mesmo needed).
+  const seen=new Set(), toLoad=[];
+  for(const dia of needed){ if(loadedDays.has(dia)||seen.has(dia))continue; seen.add(dia); toLoad.push(dia); }
+  // getDoc em PARALELO (antes era sequencial: 1 RTT por dia → ~3s com 11 dias).
+  const snaps=await Promise.all(toLoad.map(dia=>getDoc(doc(db,"conciliacao",dayDocId(dia)))));
+  // Processa na ordem determinística de toLoad — semântica idêntica (push/baseline/skipped).
   let skipped=0;
-  for(const dia of needed){
-    if(loadedDays.has(dia))continue;
-    const snap=await getDoc(doc(db,"conciliacao",dayDocId(dia)));
+  toLoad.forEach((dia,i)=>{
+    const snap=snaps[i];
     const data=snap.exists()?snap.data():{};
     const rs=sanitizeRemoteList(data.sales,normSale);
     const rb=sanitizeRemoteList(data.bank,normBank);
@@ -904,7 +910,7 @@ async function ensureMonthLoaded(mes){
     _baselineByDay.set(dia,{saleIds:new Set(rs.list.map(s=>s.id)),bankIds:new Set(rb.list.map(b=>b.id))});
     loadedDays.add(dia);
     skipped+=rs.skipped+rb.skipped;
-  }
+  });
   if(skipped>0) showDataWarning(`${skipped} registro(s) inválido(s) foram ignorados.`); else hideDataWarning();
 }
 
@@ -1432,23 +1438,24 @@ function dayDetailHtml(r){
   const orderedPairs=[...m.pairs.filter(isTol),...m.pairs.filter(p=>!isTol(p))];
   const sumPairDiff=round2(m.pairs.reduce((a,p)=>a+p.diff,0));
 
-  // Coluna Vendas: culpados (âmbar ≈, chip da dif.) → verdes (✓) → órfãs (⚠).
+  // Coluna Vendas: órfãs (⚠) no TOPO → culpados (âmbar ≈, chip da dif.) → verdes (✓).
+  // Órfão/âmbar sobem p/ não ficarem enterrados sob centenas de pares perfeitos.
   const saleItems=[
+    ...m.salesOnly.map(s=>`<div class="match-item match-orphan-sale"><span class="mi-l">⚠ ${escHtml(s.bandeira)} · ${escHtml(s.modality)} — sem crédito</span><span class="mi-r" style="color:var(--red)">${fmtBRL(s.liquido)}</span></div>`),
     ...orderedPairs.map(p=>{
       const cls=isTol(p)?"match-tol":"match-ok", mark=isTol(p)?"≈":"✓";
       const chip=isTol(p)?`<span class="match-diff">${p.diff>0?"+":""}${fmtBRL(p.diff)}</span>`:"";
       return `<div class="match-item ${cls}"><span class="mi-l">${mark} ${escHtml(p.sale.bandeira)} · ${escHtml(p.sale.modality)}</span><span class="mi-r">${fmtBRL(p.sale.liquido)}${chip}</span></div>`;
     }),
-    ...m.salesOnly.map(s=>`<div class="match-item match-orphan-sale"><span class="mi-l">⚠ ${escHtml(s.bandeira)} · ${escHtml(s.modality)} — sem crédito</span><span class="mi-r" style="color:var(--red)">${fmtBRL(s.liquido)}</span></div>`),
   ].join("")||`<div class="detail-empty">Nenhuma venda neste dia.</div>`;
 
-  // Coluna Créditos: mesma ordem dos pares (alinha com Vendas) → órfãos (⚠).
+  // Coluna Créditos: órfãos (⚠) no TOPO → mesma ordem dos pares (alinha com Vendas).
   const bankItems=[
+    ...m.creditsOnly.map(c=>`<div class="match-item match-orphan-bank"><span class="mi-l">⚠ ${escHtml(c.description)||"—"} — sem venda</span><span class="mi-r" style="color:var(--purple)">${fmtBRL(c.amount)}</span></div>`),
     ...orderedPairs.map(p=>{
       const cls=isTol(p)?"match-tol":"match-ok", mark=isTol(p)?"≈":"✓";
       return `<div class="match-item ${cls}"><span class="mi-l">${mark} ${escHtml(p.credit.description)||"—"}</span><span class="mi-r">${fmtBRL(p.credit.amount)}</span></div>`;
     }),
-    ...m.creditsOnly.map(c=>`<div class="match-item match-orphan-bank"><span class="mi-l">⚠ ${escHtml(c.description)||"—"} — sem venda</span><span class="mi-r" style="color:var(--purple)">${fmtBRL(c.amount)}</span></div>`),
   ].join("")||`<div class="detail-empty">Nenhum crédito no banco neste dia.</div>`;
 
   // Nota sub-centavo: dia divergente, nenhum culpado >=1¢ e sem órfãos → a
@@ -2377,12 +2384,14 @@ window.exportBackupJSON=async function(){
     if(!meta||sv<2){ showMsg("backup-msg",`Meta do posto ${activePosto} não encontrado (sv>=2). Backup abortado.`,"err"); return; }
     const dias=Array.isArray(meta.days)?meta.days.map(x=>x.dia).filter(Boolean):[];
     const allSales=[],allBank=[];
-    for(const dia of dias){
-      const s=await getDoc(doc(db,"conciliacao",dayDocId(dia)));
+    // getDoc dos day-docs em PARALELO; agrega na ordem original de `dias`
+    // (semântica idêntica ao loop sequencial, só que sem 1 RTT por dia).
+    const daySnaps=await Promise.all(dias.map(dia=>getDoc(doc(db,"conciliacao",dayDocId(dia)))));
+    daySnaps.forEach(s=>{
       const dd=s.exists()?backupSerialize(s.data()):{};
       if(Array.isArray(dd.sales)) allSales.push(...dd.sales);
       if(Array.isArray(dd.bank))  allBank.push(...dd.bank);
-    }
+    });
     const consolidated={sales:allSales,bank:allBank,mdr:backupSerialize(meta.mdr),config:backupSerialize(meta.config)};
     const backup={
       exported_at:new Date().toISOString(),
