@@ -11,10 +11,14 @@ rules_version = '2';
 //        ou "partner". Ambos com acesso total. Sem role válido → negado.
 //   v4 — validDocId: só docIds legítimos (posto1 / _meta / _m_).
 //   v5 — envelope: valida forma do topo de cada doc (hasOnly/hasAll/tipos).
-//   v6 — paginação DIÁRIA + multi-posto (esta): docId genérico posto[0-9]+
+//   v6 — paginação DIÁRIA + multi-posto: docId genérico posto[0-9]+
 //        (aceita posto1, posto2, …); novo doc-dia postoN_d_YYYY-MM-DD com
 //        isValidDayDoc; meta passa a indexar DIAS (isValidMeta {config,mdr,days},
 //        teto 4000); doc-mês (_m_) MANTIDO só durante a transição mês→dia.
+//   v7 — multi-posto DE VERDADE (esta): novo doc postos_registry {postos:[{id,nome}]}
+//        (isValidRegistry, teto 50) — índice dos postos do dono. Migração mês→dia
+//        concluída → doc-mês (_m_) e isValidMonthDoc REMOVIDOS do validDocId/envelope.
+//        RBAC e audit_log intocados.
 //
 // Modelo de papéis:
 //   - "admin"   → acesso total à coleção `conciliacao`.
@@ -58,17 +62,7 @@ service cloud.firestore {
         && d.config is map;
     }
 
-    // Doc MÊS (postoN_m_YYYY-MM): topo = SÓ {sales, bank}. Sem mdr/config.
-    // MANTIDO durante a transição mês→dia (a migração lê os _m_ antigos; remover só
-    // no aperto final das rules, depois que os day-docs estiverem sólidos).
-    function isValidMonthDoc(d) {
-      return d.keys().hasOnly(['sales','bank'])
-        && d.keys().hasAll(['sales','bank'])
-        && d.sales is list && d.sales.size() <= 10000
-        && d.bank  is list && d.bank.size()  <= 10000;
-    }
-
-    // Doc DIA (postoN_d_YYYY-MM-DD): topo = SÓ {sales, bank} — mesma forma do doc-mês.
+    // Doc DIA (postoN_d_YYYY-MM-DD): topo = SÓ {sales, bank}.
     // Um dia real tem ~768 registros; teto 10000 é folga sã contra payload absurdo.
     function isValidDayDoc(d) {
       return d.keys().hasOnly(['sales','bank'])
@@ -92,30 +86,42 @@ service cloud.firestore {
              || d.schemaVersion is int || d.schemaVersion is float );
     }
 
+    // Doc REGISTRY (postos_registry): topo = SÓ {postos}. Índice dos postos do dono:
+    // postos:[{id,nome}]. Teto 50 postos. Como Rules não iteram listas, o shape de
+    // cada item ({id,nome} com id casando ^posto[0-9]+$) é validado NO CLIENTE
+    // (createPosto/bootstrap) — aqui validamos só o envelope (list + tamanho).
+    function isValidRegistry(d) {
+      return d.keys().hasOnly(['postos'])
+        && d.keys().hasAll(['postos'])
+        && d.postos is list && d.postos.size() <= 50;
+    }
+
     // Dados do app na coleção 'conciliacao'. Hardening (v4): além do RBAC,
     // o docId precisa ser um id LEGÍTIMO (defesa em profundidade — impede que
     // uma conta autorizada crie/leia docs arbitrários na coleção).
-    //   postoN               → doc legado (single-doc; mantido p/ rollback)
+    //   postos_registry      → índice dos postos do dono {postos:[{id,nome}]}
+    //   postoN               → doc legado (single-doc; órfão pós-migração)
     //   postoN_meta          → config/mdr + índice de DIAS (modelo paginado diário)
     //   postoN_d_YYYY-MM-DD  → dados de um DIA (sales+bank)  [modelo atual]
-    //   postoN_m_YYYY-MM     → dados de um mês (sales+bank)  [legado da paginação; só na transição]
-    // MULTI-POSTO: a regex passou de `posto1` fixo para `posto[0-9]+` genérico —
-    // aceita posto1, posto2, … desde já (o app ainda é mono-posto; isto só libera
-    // QUAIS docIds passam, o RBAC continua igual). Transição mês→dia: aceita _d_ E _m_.
-    // RBAC inalterado vs v3: acesso total só admin OU partner.
+    // MULTI-POSTO: docId genérico posto[0-9]+ (posto1, posto2, …) + o doc singular
+    // postos_registry. O doc-mês (_m_) saiu — migração mês→dia concluída, nenhum
+    // posto novo passa por ele. RBAC inalterado vs v3: acesso total só admin OU partner.
     match /conciliacao/{docId} {
-      // QUEM pode (RBAC, inalterado vs v3/v4) e QUAIS docIds são legítimos (v4/multi-posto).
+      // QUEM pode (RBAC, inalterado) e QUAIS docIds são legítimos (multi-posto).
       function authed()     { return isAdmin() || isPartner(); }
-      function validDocId() { return docId.matches('^posto[0-9]+(_meta|_d_[0-9]{4}-[0-9]{2}-[0-9]{2}|_m_[0-9]{4}-[0-9]{2})?$'); }
+      function validDocId() {
+        return docId == 'postos_registry'
+            || docId.matches('^posto[0-9]+(_meta|_d_[0-9]{4}-[0-9]{2}-[0-9]{2})?$');
+      }
 
       // Roteia o validador de envelope pela FORMA do docId. Definida aqui dentro
       // porque referencia `docId`. Qualquer docId fora das formas → false (mas o
       // validDocId() já barraria antes; isto é só fail-safe).
       function envelopeOk() {
-        return docId.matches('^posto[0-9]+$')                              ? isValidLegacyDoc(request.resource.data)
+        return docId == 'postos_registry'                                  ? isValidRegistry(request.resource.data)
+             : docId.matches('^posto[0-9]+$')                              ? isValidLegacyDoc(request.resource.data)
              : docId.matches('^posto[0-9]+_meta$')                         ? isValidMeta(request.resource.data)
              : docId.matches('^posto[0-9]+_d_[0-9]{4}-[0-9]{2}-[0-9]{2}$') ? isValidDayDoc(request.resource.data)
-             : docId.matches('^posto[0-9]+_m_[0-9]{4}-[0-9]{2}$')          ? isValidMonthDoc(request.resource.data)
              : false;
       }
 

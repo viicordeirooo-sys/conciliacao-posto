@@ -214,7 +214,7 @@ tr:hover td{background:#0a1628}
     <div class="header-top">
       <div>
         <div class="site-name">⛽ <span>Conciliação</span></div>
-        <div class="posto-name" id="posto-name-header">Posto 1</div>
+        <select class="posto-name" id="posto-select" onchange="switchPosto(this.value)" style="background:transparent;border:none;color:inherit;cursor:pointer;padding:0" title="Trocar de posto"></select>
         <div class="posto-sub" id="sync-status"><span class="sync-dot" id="sync-dot"></span><span id="sync-text">Sincronizado com Firebase</span></div>
       </div>
       <button class="logout-btn" onclick="doLogout()">Sair</button>
@@ -319,7 +319,9 @@ let _currentRole = null;
 //    Publicar com:  firebase deploy --only firestore:rules
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const DOC_ID = "posto1";
+// Posto ativo da sessão (multi-posto). Deriva TODOS os docIds do posto (meta/dia).
+// Muda em switchPosto; persistido em localStorage. Default até o registry carregar.
+let activePosto = "posto1";
 
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
@@ -388,11 +390,6 @@ let filterMonth = "";
 let mdrBandeira = "Visa";
 let saveTimeout = null;
 let _savePending = false;
-// Baseline = último estado remoto observado (load/snapshot/save). Usado para
-// o merge 3-vias por id: deduz o que foi adicionado/removido localmente.
-let _baselineSaleIds = new Set();
-let _baselineBankIds = new Set();
-let _txResult = null;
 // Paginação por DIA (só ativa quando posto1_meta tiver schemaVersion>=2).
 let paginatedMode=false;        // definido no boot ao ler posto1_meta
 let daysIndex=[];               // [{dia,salesCount,bankCount}] do meta (fonte dos dropdowns; meses = únicos dia.slice(0,7))
@@ -400,6 +397,7 @@ let loadedDays=new Set();       // dias-doc já carregados em STATE (cache; evit
 let _baselineByDay=new Map();   // dia → {saleIds:Set,bankIds:Set} — baseline por dia, isolado do legado
 let metaListener=null;          // (paginado) unsub do listener do posto1_meta
 let dayListeners=new Map();     // (paginado) dia → unsub do doc do dia (port fiel: 1 listener por day-doc do mês selecionado)
+let postosRegistry=[];          // [{id,nome}] do doc postos_registry (índice dos postos do dono)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 // Data local (fuso do dispositivo), não UTC: toISOString() viraria o dia
@@ -439,15 +437,10 @@ function pct(v){ return (v||0).toFixed(2)+"%" }
 // nunca por expectedDate (mutável via recalc/config) — chave de partição estável.
 // A granularidade era MENSAL, mas 1 dia real ≈ 129 KB (768 registros) estoura o
 // teto de 1 MB por doc no ~dia 8 → migramos para 1 doc por dia (posto1_d_YYYY-MM-DD).
-const metaDocId = `${DOC_ID}_meta`;
-function dayDocId(dia){ return `${DOC_ID}_d_${dia}`; }
-// monthDocId: usado SÓ pela migração mês→dia (ler os posto1_m_* antigos). Fora
-// da migração, o fluxo permanente não referencia mais docs mensais.
-function monthDocId(mes){ return `${DOC_ID}_m_${mes}`; }
+function metaDocId(){ return `${activePosto}_meta`; }
+function dayDocId(dia){ return `${activePosto}_d_${dia}`; }
 // Dia-partição de um registro = sua DATA (venda feita / dinheiro caído), YYYY-MM-DD.
 function partitionDay(rec){ return rec?.date; }
-// Mês de um registro (só p/ agrupar/rotular nos renders — a UI filtra por mês).
-function partitionMonth(rec){ return monthKey(rec?.date); }
 // Quantos dias-calendário anteriores a um mês precisam ser carregados p/ a
 // conciliação daquele mês ter TODAS as vendas que liquidam nele. Deriva do MAIOR
 // prazo de liquidação: o expectedDate dista no máx. maxGap dias-calendário da date.
@@ -685,11 +678,6 @@ function getReconciliation(){
 }
 
 // ─── Firebase ─────────────────────────────────────────────────────────────────
-function setBaseline(sales,bank){
-  _baselineSaleIds=new Set((sales||[]).map(s=>s.id));
-  _baselineBankIds=new Set((bank||[]).map(b=>b.id));
-}
-
 // Merge 3-vias por id: parte do remoto, remove o que foi deletado localmente
 // (estava no baseline e sumiu do local) e aplica os itens locais (add/edit vence).
 // Garante que adds concorrentes de A e B sobrevivam e que deleções sejam respeitadas.
@@ -701,14 +689,139 @@ function mergeListById(remoteList,localList,baselineIds){
   return [...map.values()];
 }
 
+// ── Registry de postos (multi-posto) ────────────────────────────────────────────
+const REGISTRY_ID="postos_registry";
+const LS_ACTIVE_POSTO="cp_active_posto";
+function loadSavedPosto(){ try{ return localStorage.getItem(LS_ACTIVE_POSTO)||""; }catch(e){ return ""; } }
+function saveActivePosto(id){ try{ localStorage.setItem(LS_ACTIVE_POSTO,id); }catch(e){} }
+// Posto ativo = último salvo (se ainda existe no registry) senão o 1º do registry.
+function resolveActivePosto(){
+  const saved=loadSavedPosto();
+  if(saved && postosRegistry.some(p=>p.id===saved)) return saved;
+  return postosRegistry.length ? postosRegistry[0].id : "posto1";
+}
+// Carrega o registry em `postosRegistry`. BOOTSTRAP: se não existir (ou vier vazio),
+// cria com o posto1 atual — numa tx (get→set) p/ não clobberar se outra aba criou
+// concorrentemente. Idempotente. Chamado no boot antes de escolher o posto ativo.
+async function ensureRegistry(){
+  const ref=doc(db,"conciliacao",REGISTRY_ID);
+  const snap=await getDoc(ref);
+  if(snap.exists() && Array.isArray(snap.data().postos) && snap.data().postos.length){
+    postosRegistry=snap.data().postos;
+    return postosRegistry;
+  }
+  let created=null, didCreate=false;
+  await runTransaction(db,async(tx)=>{
+    const s=await tx.get(ref);
+    if(s.exists() && Array.isArray(s.data().postos) && s.data().postos.length){ created=s.data().postos; didCreate=false; return; }
+    created=[{id:"posto1",nome:"Posto 1"}];
+    tx.set(ref,{postos:created});
+    didCreate=true;
+  });
+  postosRegistry=created||[{id:"posto1",nome:"Posto 1"}];
+  if(didCreate) logAudit("bootstrap_registry",REGISTRY_ID,{postos:postosRegistry.length});
+  return postosRegistry;
+}
+
+// Troca de posto — espelha o fluxo logout→login (detach + reset paginado + reset
+// STATE + reload do meta do posto novo). window.* (handler inline do <select>).
+window.switchPosto=async function(id){
+  if(id===activePosto) return;
+  if(!postosRegistry.some(p=>p.id===id)){ renderPostoSelector(); return; }  // repõe seleção se id inválido
+  // GUARD A (anti-corrupção cruzada): um save debounced pendente disparando DEPOIS da
+  // troca gravaria registros do posto ANTIGO nos day-docs do posto NOVO (metaDocId/
+  // dayDocId derivam de activePosto). Então: cancela o timer e dá FLUSH síncrono com o
+  // activePosto ANTIGO ainda ativo, ANTES de qualquer detach/reset/troca. flushSave
+  // NÃO relança (engole o erro e mantém _savePending=true) → o sinal de falha é o
+  // _savePending continuar true após o await. Se FALHOU, ABORTA a troca — resetar aqui
+  // apagaria edições não salvas do posto antigo.
+  if(saveTimeout){ clearTimeout(saveTimeout); saveTimeout=null; }
+  if(_savePending){
+    await flushSave();
+    if(_savePending){   // ainda pendente → o flush FALHOU
+      console.error("[switchPosto] flush do save pendente falhou — troca cancelada");
+      showDataWarning(`Há alterações não salvas em ${activePosto} que não puderam ser gravadas. Troca de posto cancelada — tente novamente.`);
+      renderPostoSelector();   // repõe a seleção no posto atual (o <select> já mudou visualmente)
+      return;
+    }
+  }
+  // Espelho do logout→login (sem sair da sessão):
+  detachPaginatedListeners();
+  paginatedMode=false; daysIndex=[]; loadedDays.clear(); _baselineByDay.clear();
+  STATE.sales=[]; STATE.bank=[]; STATE.mdr=DEFAULT_MDR; STATE.config=DEFAULT_CONFIG;
+  filterStatus="todos"; filterMonth=""; resumoMonth=""; mdrBandeira="Visa";
+  activePosto=id; saveActivePosto(id);
+  await loadFromFirebase().catch(e=>{ console.error("[switchPosto] load falhou:",e?.code,e?.message); showAccessError(e); });
+  try{ renderCurrentTab(); }catch(e){ console.error("[switchPosto] render falhou:",e); showAccessError(e); }
+  attachPaginatedListeners();
+  logAudit("switch_posto",id,{});
+};
+
+// Renomeia o posto ATIVO: grava o nome no meta (config.postoName, via saveToFirebase)
+// E sincroniza o nome no registry (fonte do seletor) — tx get→set p/ não clobberar
+// outra aba. Chamado pelo input "Nome do Posto" do Config. window.* (handler inline).
+window.renamePosto=async function(nome){
+  nome=String(nome||"").trim().slice(0,100);
+  STATE.config.postoName=nome;
+  saveToFirebase();                          // persiste no meta do posto ativo (config)
+  renderPostoSelector();                     // reflete de imediato no header
+  try{
+    await runTransaction(db,async(tx)=>{
+      const ref=doc(db,"conciliacao",REGISTRY_ID);
+      const s=await tx.get(ref);
+      const list=(s.exists()&&Array.isArray(s.data().postos))?s.data().postos:postosRegistry;
+      const next=list.map(p=>p.id===activePosto?{...p,nome}:p);
+      tx.set(ref,{postos:next});
+      postosRegistry=next;
+    });
+  }catch(e){ console.error("[renamePosto] falha ao sincronizar registry:",e); }
+  renderPostoSelector();
+  logAudit("rename_posto",activePosto,{nome});
+};
+
+// Cria um posto novo: grava postoN_meta {schemaVersion:2, config:DEFAULT_CONFIG(+nome),
+// mdr:DEFAULT_MDR, days:[]} + entrada no registry, numa ÚNICA transação → nasce direto
+// em modo diário, vazio. GUARD B: lê o registry DENTRO da tx (tx.get) e monta a lista
+// nova a partir do REMOTO (não da cópia em memória) — evita clobber com outra aba que
+// tenha criado um posto. id/shape validados no cliente (rules não iteram a lista).
+window.createPosto=async function(nome){
+  nome=String(nome||"").trim().slice(0,100);
+  if(!nome){ showMsg("postos-msg","Informe um nome para o novo posto.","err"); return; }
+  let newId=null;
+  try{
+    await runTransaction(db,async(tx)=>{
+      const regRef=doc(db,"conciliacao",REGISTRY_ID);
+      const s=await tx.get(regRef);
+      const list=(s.exists()&&Array.isArray(s.data().postos))?s.data().postos:[];
+      // próximo id = maior postoN existente + 1 (varre os ids do remoto).
+      let maxN=0;
+      list.forEach(p=>{ const m=/^posto([0-9]+)$/.exec(p&&p.id||""); if(m){ const n=+m[1]; if(n>maxN)maxN=n; } });
+      newId="posto"+(maxN+1);
+      if(!/^posto[0-9]+$/.test(newId)) throw new Error("id inválido gerado: "+newId);
+      const next=[...list,{id:newId,nome}];
+      if(next.length>50) throw new Error("limite de 50 postos atingido");
+      const cfg={...DEFAULT_CONFIG,postoName:nome};
+      tx.set(doc(db,"conciliacao",`${newId}_meta`),{schemaVersion:2,config:cfg,mdr:DEFAULT_MDR,days:[]});
+      tx.set(regRef,{postos:next});
+      postosRegistry=next;
+    });
+  }catch(e){
+    console.error("[createPosto] falha:",e?.code,e?.message);
+    showMsg("postos-msg","Falha ao criar posto: "+(e?.message||e?.code||"erro"),"err");
+    return;
+  }
+  logAudit("create_posto",newId,{nome});
+  showMsg("postos-msg",`Posto ${newId} (${nome}) criado. Selecione-o no topo para abrir.`,"ok");
+  renderPostoSelector();
+  if(currentTab==="config") renderConfig();   // atualiza a lista de postos no card
+};
+
 async function loadFromFirebase(){
-  // Detecção de modo pelo schemaVersion do posto1_meta:
-  //   >=2 → paginação DIÁRIA (regime atual).
-  //   ==1 → paginação MENSAL antiga, ainda NÃO convertida → banner pedindo a migração
-  //         mês→dia + fallback: lê o posto1 LEGADO (intacto) para a tela não ficar vazia
-  //         na janela transitória deploy→migração. Read-only, seguro.
-  //   sem meta → legado (comportamento histórico).
-  const metaSnap=await getDoc(doc(db,"conciliacao",metaDocId));
+  // Multi-posto (modo diário único): cada posto tem seu meta postoN_meta com
+  // schemaVersion>=2 — nasce assim (createPosto) e o posto1 já está migrado. O modelo
+  // LEGADO (single-doc) foi removido; não há mais fallback. Meta ausente/inválido →
+  // STATE vazio + banner (não deveria acontecer para um posto do registry).
+  const metaSnap=await getDoc(doc(db,"conciliacao",metaDocId()));
   const meta=metaSnap.exists()?metaSnap.data():null;
   const sv=meta?Number(meta.schemaVersion)||0:0;
   if(meta&&sv>=2){
@@ -720,21 +833,7 @@ async function loadFromFirebase(){
     hideAccessError();
     return;
   }
-  const ref=doc(db,"conciliacao",DOC_ID);
-  const snap=await getDoc(ref);
-  let skipped=0;
-  if(snap.exists()){
-    const d=snap.data();
-    if(d.sales){ const rs=sanitizeRemoteList(d.sales,normSale); STATE.sales=rs.list; skipped+=rs.skipped; }
-    if(d.bank){ const rb=sanitizeRemoteList(d.bank,normBank); STATE.bank=rb.list; skipped+=rb.skipped; }
-    if(d.mdr)STATE.mdr=sanitizeMdr({...DEFAULT_MDR,...d.mdr});
-    if(d.config)STATE.config=sanitizeConfig({...DEFAULT_CONFIG,...d.config});
-  }
-  setBaseline(STATE.sales,STATE.bank);
-  hideAccessError(); // getDoc ok → acesso funcionando, limpa banner se estava visível
-  if(meta&&sv===1) showDataWarning('Paginação diária pendente — rode "Migrar mês→dia" na aba Config. Exibindo o backup legado enquanto isso.');
-  else if(skipped>0) showDataWarning(`${skipped} registro(s) inválido(s) foram ignorados.`);
-  else hideDataWarning();
+  showDataWarning(`Meta do posto ${activePosto} não encontrado ou inválido (esperado schemaVersion>=2).`);
 }
 
 // ── Paginação por DIA — read path (ativo com schemaVersion>=2) ──────────────────
@@ -839,7 +938,7 @@ function ensureMonthListeners(mes){
 }
 // Liga os listeners paginados: meta (config/mdr/índice) + day-docs do mês ativo.
 function attachPaginatedListeners(){
-  metaListener=onSnapshot(doc(db,"conciliacao",metaDocId),onMetaSnap,onListenerErr);
+  metaListener=onSnapshot(doc(db,"conciliacao",metaDocId()),onMetaSnap,onListenerErr);
   ensureMonthListeners(pickActiveMonth(daysIndex));
 }
 // Solta todos os listeners paginados (logout).
@@ -847,12 +946,6 @@ function detachPaginatedListeners(){
   if(metaListener){ metaListener(); metaListener=null; }
   for(const [,unsub] of dayListeners){ unsub(); }
   dayListeners.clear();
-}
-
-// Tamanho aproximado (bytes UTF-8) do que é gravado no doc do Firestore.
-function docSizeBytes(){
-  try{ return new TextEncoder().encode(JSON.stringify({sales:STATE.sales,bank:STATE.bank,mdr:STATE.mdr,config:STATE.config})).length; }
-  catch(e){ return 0; }
 }
 
 function setSyncStatus(state,detail){
@@ -923,38 +1016,6 @@ function writeMetaPayload(remoteMeta,result){
   const days=[...idx.values()].sort((a,b)=>a.dia.localeCompare(b.dia));
   return {schemaVersion:rm.schemaVersion||2,config:STATE.config,mdr:STATE.mdr,days};
 }
-// ── Fase 4 (backfill) — sub-1: plano PURO de partição (sem escrita/UI/Firestore/STATE) ──
-// Lê o STATE legado já carregado e devolve o que SERIA gravado: um balde por mês
-// {sales,bank} + um balde semMes p/ registros com date inválido (monthKey falsy) —
-// NUNCA descartados. O meta sai SEM schemaVersion DE PROPÓSITO: ligar schemaVersion
-// acenderia o modo paginado no boot (~linha 700) e o cutover é a Fase 5, não aqui.
-// Por isso NÃO reusa writeMetaPayload (que força schemaVersion||1). Partição via
-// partitionMonth (reuso, não reimplementa). window.* por causa do uso em handlers
-// inline na sub-2 (gotcha handlers inline em módulo).
-window.buildBackfillPlan=function(){
-  const byMonth=new Map();                                   // mes → {sales:[],bank:[]}
-  const semMes={sales:[],bank:[],salesCount:0,bankCount:0};  // date inválido (monthKey falsy)
-  const bucket=(mes)=>{ if(!byMonth.has(mes))byMonth.set(mes,{sales:[],bank:[]}); return byMonth.get(mes); };
-  (STATE.sales||[]).forEach(s=>{ const m=partitionMonth(s); if(m)bucket(m).sales.push(s); else semMes.sales.push(s); });
-  (STATE.bank||[]).forEach(b=>{ const m=partitionMonth(b); if(m)bucket(m).bank.push(b); else semMes.bank.push(b); });
-  semMes.salesCount=semMes.sales.length;
-  semMes.bankCount=semMes.bank.length;
-  const meses=[...byMonth.entries()]
-    .map(([mes,mm])=>({mes,sales:mm.sales,bank:mm.bank,salesCount:mm.sales.length,bankCount:mm.bank.length}))
-    .sort((a,b)=>a.mes.localeCompare(b.mes));
-  // meta SEM schemaVersion (dormente até a Fase 5).
-  const meta={config:STATE.config,mdr:STATE.mdr,months:meses.map(x=>({mes:x.mes,salesCount:x.salesCount,bankCount:x.bankCount}))};
-  const planSales=meses.reduce((a,x)=>a+x.salesCount,0)+semMes.salesCount;
-  const planBank=meses.reduce((a,x)=>a+x.bankCount,0)+semMes.bankCount;
-  const stateSales=(STATE.sales||[]).length;
-  const stateBank=(STATE.bank||[]).length;
-  return {
-    meses,
-    semMes,
-    meta,
-    totais:{ planSales, planBank, stateSales, stateBank, salesOk:planSales===stateSales, bankOk:planBank===stateBank },
-  };
-};
 // Save paginado: UMA transação multi-doc sobre os DIAS afetados + meta. Atômica →
 // o move de venda entre dias (delete na origem + add no destino) commita junto.
 async function flushSavePaginated(){
@@ -964,7 +1025,7 @@ async function flushSavePaginated(){
   const days=new Set(loadedDays);
   STATE.sales.forEach(s=>{ const d=partitionDay(s); if(d)days.add(d); });
   STATE.bank.forEach(b=>{ const d=partitionDay(b); if(d)days.add(d); });
-  const metaRef=doc(db,"conciliacao",metaDocId);
+  const metaRef=doc(db,"conciliacao",metaDocId());
   const result=new Map();
   let metaPayload=null;
   await runTransaction(db,async(tx)=>{
@@ -1005,43 +1066,13 @@ async function flushSavePaginated(){
     setSyncStatus("saved");
   }
   // Trilha de auditoria (best-effort, fora da tx): registra o save paginado.
-  logAudit("save_paginated","posto1_meta+dias",{daysCount:result.size,salesTotal:STATE.sales.length,bankTotal:STATE.bank.length});
+  logAudit("save_paginated",`${activePosto}_meta+dias`,{daysCount:result.size,salesTotal:STATE.sales.length,bankTotal:STATE.bank.length});
 }
 
 async function flushSave(){
   setSyncStatus("saving");
   try{
-    if(paginatedMode){ await flushSavePaginated(); return; }
-    const ref=doc(db,"conciliacao",DOC_ID);
-    // Transação read-modify-write: mescla o estado local sobre o remoto atual,
-    // em vez de sobrescrever o doc inteiro (evita lost-update entre usuários).
-    // mdr/config seguem last-writer-wins (não são listas; edição concorrente é rara).
-    await runTransaction(db,async(tx)=>{
-      const snap=await tx.get(ref);
-      const remote=snap.exists()?snap.data():{};
-      const mergedSales=mergeListById(remote.sales,STATE.sales,_baselineSaleIds);
-      const mergedBank=mergeListById(remote.bank,STATE.bank,_baselineBankIds);
-      tx.set(ref,{sales:mergedSales,bank:mergedBank,mdr:STATE.mdr,config:STATE.config});
-      _txResult={sales:mergedSales,bank:mergedBank};
-    });
-    // Aplica o resultado mesclado localmente (reflete adds remotos de imediato).
-    if(_txResult){
-      STATE.sales=_txResult.sales;
-      STATE.bank=_txResult.bank;
-      setBaseline(STATE.sales,STATE.bank);
-      _txResult=null;
-      if(document.getElementById("app").style.display!=="none") renderCurrentTab();
-    }
-    _savePending=false;
-    const bytes=docSizeBytes();
-    if(bytes>DOC_SIZE_WARN){
-      console.warn(`[saveToFirebase] base em ${Math.round(bytes/1024)} KB (limite ~1 MB por doc).`);
-      setSyncStatus("warn",Math.round(bytes/1024));
-    }else{
-      setSyncStatus("saved");
-    }
-    // Trilha de auditoria (best-effort, fora da tx): registra o save legado.
-    logAudit("save_legacy","posto1",{salesCount:STATE.sales.length,bankCount:STATE.bank.length,docKB:Math.round(bytes/1024)});
+    await flushSavePaginated();
   }catch(e){
     _savePending=true;
     console.error("[saveToFirebase] falha ao gravar:",e?.code,e?.message,e);
@@ -1067,30 +1098,40 @@ window.retrySave=function(){
 // uma falha de log NUNCA pode derrubar a gravação. ts = serverTimestamp() (servidor).
 async function logAudit(action, target, summary){
   try{
+    // posto vai DENTRO de summary (map): o envelope do audit_log tem hasOnly fixo nas
+    // rules (sem campo top-level `posto`) — injetar aqui carimba TODA ação com o posto
+    // ativo sem tocar nas rules. Multi-posto: distingue qual posto fez cada gravação.
     await addDoc(collection(db,"audit_log"),{
       ts: serverTimestamp(),
       action, target,
       uid: auth.currentUser?.uid,
       email: auth.currentUser?.email || null,
       role: _currentRole || null,
-      summary: summary || {},
+      summary: { ...(summary || {}), posto: activePosto },
     });
   }catch(e){ console.warn("[audit] falha ao registrar (ignorada):", e?.code||e?.message); }
 }
 
 // ─── Auth state ───────────────────────────────────────────────────────────────
-let unsubscribeSnapshot=null;
-
 onAuthStateChanged(auth,async(user)=>{
   if(user){
     clearLoginState();
-    // Captura o role (claim) p/ a trilha de auditoria, sem travar o fluxo de login.
-    user.getIdTokenResult().then(r=>{ _currentRole=r.claims.role||null; }).catch(()=>{ _currentRole=null; });
+    // Captura o role (claim) ANTES do bootstrap/audit — a trilha registra quem fez.
+    try{ const r=await user.getIdTokenResult(); _currentRole=r.claims.role||null; }catch(e){ _currentRole=null; }
     document.getElementById("login-screen").style.display="none";
     document.getElementById("app").style.display="block";
     document.getElementById("login-email").value="";
     document.getElementById("login-input").value="";
     document.getElementById("login-error").textContent="";
+    // Multi-posto: carrega o registry (bootstrap se ausente) e escolhe o posto ativo.
+    try{
+      await ensureRegistry();
+      activePosto=resolveActivePosto();
+      saveActivePosto(activePosto);
+    }catch(e){
+      console.error("[ensureRegistry] falha:",e?.code,e?.message);
+      showAccessError(e);
+    }
     await loadFromFirebase().catch(e=>{
       console.error("[loadFromFirebase] falha:",e?.code,e?.message);
       showAccessError(e);
@@ -1100,36 +1141,8 @@ onAuthStateChanged(auth,async(user)=>{
       console.error("[render] falha ao renderizar aba:",e);
       showAccessError(e);
     }
-    if(paginatedMode){
-      attachPaginatedListeners();
-    }else{
-      unsubscribeSnapshot=onSnapshot(
-      doc(db,"conciliacao",DOC_ID),
-      (snap)=>{
-        try{
-          if(snap.exists()&&snap.metadata.hasPendingWrites===false){
-            const d=snap.data();
-            let skipped=0;
-            if(d.sales){ const rs=sanitizeRemoteList(d.sales,normSale); STATE.sales=rs.list; skipped+=rs.skipped; }
-            if(d.bank){ const rb=sanitizeRemoteList(d.bank,normBank); STATE.bank=rb.list; skipped+=rb.skipped; }
-            if(d.mdr)STATE.mdr=sanitizeMdr({...DEFAULT_MDR,...d.mdr});
-            if(d.config)STATE.config=sanitizeConfig({...DEFAULT_CONFIG,...d.config});
-            setBaseline(STATE.sales,STATE.bank);
-            hideAccessError(); // snapshot ok → acesso funcionando, limpa banner
-            if(skipped>0) showDataWarning(`${skipped} registro(s) remoto(s) inválido(s) foram ignorados.`); else hideDataWarning();
-            if(document.getElementById("app").style.display!=="none") renderCurrentTab();
-          }
-        }catch(e){
-          console.error("[snapshot] falha ao aplicar dados remotos:",e);
-          showAccessError(e);
-        }
-      },
-      (err)=>{
-        console.error("[snapshot] erro no listener:",err?.code,err?.message);
-        showAccessError(err);
-      }
-      );
-    }
+    // Modo diário único: sempre listeners paginados (meta + day-docs do mês ativo).
+    attachPaginatedListeners();
     resetSessionTimer();
     ['mousemove','click','keydown','scroll','touchstart'].forEach(ev=>{
       document.addEventListener(ev,resetSessionTimer,{passive:true});
@@ -1138,9 +1151,8 @@ onAuthStateChanged(auth,async(user)=>{
     _currentRole=null;
     document.getElementById("app").style.display="none";
     document.getElementById("login-screen").style.display="flex";
-    if(unsubscribeSnapshot){ unsubscribeSnapshot(); unsubscribeSnapshot=null; }
-    detachPaginatedListeners(); // solta listeners paginados (no-op no legado)
-    paginatedMode=false; daysIndex=[]; loadedDays.clear(); _baselineByDay.clear();
+    detachPaginatedListeners(); // solta listeners paginados (meta + day-docs)
+    paginatedMode=false; daysIndex=[]; loadedDays.clear(); _baselineByDay.clear(); postosRegistry=[];
     clearSessionTimer();
     // Muta em vez de reatribuir: preserva a identidade do objeto p/ window.STATE.
     STATE.sales=[]; STATE.bank=[]; STATE.mdr=DEFAULT_MDR; STATE.config=DEFAULT_CONFIG;
@@ -1217,7 +1229,18 @@ function renderTab(name){
   else if(name==="extrato")renderExtrato();
   else if(name==="resumo")renderResumo();
   else if(name==="config")renderConfig();
-  document.getElementById("posto-name-header").textContent=STATE.config.postoName;
+  renderPostoSelector();
+}
+// Popula o <select> do header com os postos do registry, marcando o ativo. O rótulo
+// prefere o nome do registry (fonte do seletor); cai p/ STATE.config.postoName do ativo.
+function renderPostoSelector(){
+  const sel=document.getElementById("posto-select");
+  if(!sel)return;
+  const list=postosRegistry.length?postosRegistry:[{id:activePosto,nome:STATE.config.postoName||activePosto}];
+  sel.innerHTML=list.map(p=>{
+    const nome=p.id===activePosto?(STATE.config.postoName||p.nome||p.id):(p.nome||p.id);
+    return `<option value="${escHtml(p.id)}"${p.id===activePosto?" selected":""}>${escHtml(nome)}</option>`;
+  }).join("");
 }
 
 // ─── CONCILIAÇÃO ──────────────────────────────────────────────────────────────
@@ -2088,6 +2111,11 @@ function renderConfig(){
       <button style="background:none;border:none;color:var(--red);cursor:pointer;font-size:11px;padding:0" onclick="removeHoliday('${h}')">✕</button>
     </div>`).join("");
 
+  const postosList=postosRegistry.map(p=>`
+    <div style="font-size:12px;display:flex;gap:8px;align-items:center">
+      <code>${escHtml(p.id)}</code><span>${escHtml(p.nome||"")}</span>${p.id===activePosto?' <span style="color:var(--blue)">• ativo</span>':''}
+    </div>`).join("")||'<div style="font-size:12px;color:var(--muted)">(carregando…)</div>';
+
   document.getElementById("tab-config").innerHTML=`
     <div class="card card-blue">
       <div class="sec-title">Compartilhar / Backup</div>
@@ -2098,34 +2126,24 @@ function renderConfig(){
         <button class="btn" id="backup-btn" onclick="exportBackupJSON()">💾 Exportar Backup (.json)</button>
         <span id="backup-msg"></span>
       </div>
-      <div style="font-size:11px;color:var(--muted);margin-top:8px">Baixa um arquivo <code>.json</code> com tudo do banco — para backup semanal. Somente leitura, não altera os dados.</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px">Baixa um arquivo <code>.json</code> com tudo do banco (posto ativo) — para backup semanal. Somente leitura, não altera os dados.</div>
     </div>
     <div class="card">
-      <div class="sec-title">Migração para paginação (1MB)</div>
-      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Operação <strong>única</strong> que reorganiza os dados por mês para não estourar o limite de 1 MB do Firestore. Fluxo: <strong>Exportar Backup (.json)</strong> acima → <strong>Simular (dry-run)</strong> e conferir os números → <strong>Executar migração</strong> → <strong>Ativar modo paginado (cutover)</strong>. Nada é apagado — o posto1 legado fica como fallback.</p>
+      <div class="sec-title">Postos</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Postos do dono — o ativo aparece no seletor do topo. Criar um novo posto grava o meta dele (modo diário, config/MDR padrão) e adiciona ao índice, numa transação. Nasce vazio.</p>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">${postosList}</div>
       <div class="btn-row">
-        <button class="btn btn-dark" onclick="dryRunBackfill()">🧪 Simular migração (dry-run)</button>
-        <button class="btn btn-dark" onclick="executeBackfill()">▶ Executar migração</button>
-        <button class="btn btn-dark" onclick="activatePaginatedMode()">🔀 Ativar modo paginado (cutover)</button>
-        <span id="backfill-msg"></span>
+        <input type="text" id="novo-posto-nome" placeholder="Nome do novo posto" maxlength="100" style="width:200px">
+        <button class="btn btn-dark" onclick="createPosto(document.getElementById('novo-posto-nome').value)">➕ Novo posto</button>
+        <span id="postos-msg"></span>
       </div>
-      <div id="backfill-preview" style="margin-top:12px"></div>
-    </div>
-    <div class="card">
-      <div class="sec-title">Migração mês → dia (granularidade)</div>
-      <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Operação <strong>única</strong> que reparticiona os docs mensais (<code>posto1_m_*</code>) em docs <strong>diários</strong> (<code>posto1_d_YYYY-MM-DD</code>), porque um único dia de movimento já chega a ~129 KB e o doc mensal estouraria 1 MB. Fluxo: <strong>Exportar Backup (.json)</strong> acima → <strong>Migrar mês→dia</strong> (grava os day-docs + meta com <code>schemaVersion:2</code> e verifica por releitura). Os docs mensais NÃO são apagados — ficam como fallback. Recarregue a página ao final para entrar no modo diário.</p>
-      <div class="btn-row">
-        <button class="btn btn-dark" onclick="migrateMonthToDay()">🗓️ Migrar mês→dia</button>
-        <span id="m2d-msg"></span>
-      </div>
-      <div id="m2d-preview" style="margin-top:12px"></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="card">
         <div class="sec-title">Identificação</div>
         <div style="margin-bottom:14px">
           <label class="lbl">Nome do Posto</label>
-          <input type="text" value="${escHtml(STATE.config.postoName)}" onchange="STATE.config.postoName=this.value.trim().slice(0,100);saveToFirebase();document.getElementById('posto-name-header').textContent=this.value.trim().slice(0,100)">
+          <input type="text" value="${escHtml(STATE.config.postoName)}" onchange="renamePosto(this.value)">
         </div>
         <div>
           <label class="lbl">Tolerância de divergência (R$)</label>
@@ -2162,225 +2180,6 @@ function renderConfig(){
 }
 
 window.setMdrBandeira=function(b){mdrBandeira=b;renderConfig();}
-
-// Fase 4 sub-2: DRY-RUN do backfill — só preview/leitura. Chama buildBackfillPlan()
-// (puro) e desenha o plano + conferência em #backfill-preview. NÃO grava, NÃO chama
-// Firestore, NÃO muda STATE. window.* (handler inline). Tudo escapado via escHtml().
-window.dryRunBackfill=function(){
-  const plan=window.buildBackfillPlan();
-  const el=document.getElementById("backfill-preview");
-  if(!el)return;
-  const t=plan.totais;
-  const rows=plan.meses.map(m=>`<tr>
-    <td>${escHtml(m.mes)}</td>
-    <td style="text-align:right">${escHtml(m.salesCount)}</td>
-    <td style="text-align:right">${escHtml(m.bankCount)}</td>
-  </tr>`).join("");
-  const selo=(ok)=>ok?`<span class="badge badge-ok">OK</span>`:`<span class="badge badge-late">DIVERGÊNCIA</span>`;
-  const semMesAviso=(plan.semMes.salesCount>0||plan.semMes.bankCount>0)
-    ? `<div class="alert-late" style="background:#1a1400;border-color:#d4a01740;color:#e6c34a;margin-top:12px">⚠️ <strong>${escHtml(plan.semMes.salesCount)} venda(s) e ${escHtml(plan.semMes.bankCount)} crédito(s) com data inválida (sem mês)</strong> — esses registros precisam de atenção antes de qualquer gravação; não entram em nenhum mês.</div>`
-    : "";
-  el.innerHTML=`
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Mês</th><th style="text-align:right">Vendas</th><th style="text-align:right">Créditos</th></tr></thead>
-        <tbody>${rows||`<tr><td colspan="3" style="color:var(--muted)">Nenhum mês.</td></tr>`}</tbody>
-        <tfoot><tr style="font-weight:700;border-top:1px solid var(--border)">
-          <td>Total</td>
-          <td style="text-align:right">${escHtml(t.planSales)}</td>
-          <td style="text-align:right">${escHtml(t.planBank)}</td>
-        </tr></tfoot>
-      </table>
-    </div>
-    <div style="margin-top:12px;display:flex;flex-direction:column;gap:6px;font-size:12px">
-      <div>Vendas: STATE ${escHtml(t.stateSales)} vs plano ${escHtml(t.planSales)} ${selo(t.salesOk)}</div>
-      <div>Créditos: STATE ${escHtml(t.stateBank)} vs plano ${escHtml(t.planBank)} ${selo(t.bankOk)}</div>
-    </div>
-    ${semMesAviso}`;
-};
-
-// Fase 4 sub-3: EXECUÇÃO do backfill. Grava docs mensais + meta numa ÚNICA transação
-// (padrão de flushSavePaginated: writes atômicos), com 3 travas antes e releitura de
-// verificação depois. plan.meta NÃO tem schemaVersion → modo paginado segue desligado
-// (cutover = Fase 5). NÃO toca no posto1 legado (coexistência). Idempotente (tx.set
-// substitui o doc inteiro do mês). NÃO muda STATE, NÃO liga paginatedMode. window.*
-// (handler inline). Dados escapados via escHtml().
-window.executeBackfill=async function(){
-  const el=document.getElementById("backfill-preview");
-  const box=(bg,bd,fg,icon,msg)=>{ if(el) el.innerHTML=`<div class="alert-late" style="background:${bg};border-color:${bd};color:${fg};margin-top:12px">${icon} ${msg}</div>`; };
-  const red=(msg)=>box("#1a0010","#e91e8c40","#f48fb1","⛔",msg);
-  const amber=(msg)=>box("#1a1400","#d4a01740","#e6c34a","⚠️",msg);
-  const green=(msg)=>box("#06160c","#1f7a3f","#7be0a3","✅",msg);
-  const plan=window.buildBackfillPlan();
-  const t=plan.totais;
-  // TRAVA 1 — reconciliação STATE vs plano.
-  if(t.salesOk===false||t.bankOk===false){ red("Reconciliação falhou (STATE vs plano divergente). Migração abortada."); return; }
-  // TRAVA 2 — nada a migrar.
-  if(plan.meses.length===0){ amber("Nenhum mês para migrar (banco vazio). Nada a fazer."); return; }
-  // TRAVA 3 — confirmação explícita.
-  const N=plan.meses.length;
-  if(!confirm(`Isto vai gravar ${N} docs mensais + meta no Firestore. O posto1 legado NÃO será apagado. Continuar?`)) return;
-  if(el) el.innerHTML=`<div style="margin-top:12px;color:var(--muted);font-size:12px">⏳ Gravando ${escHtml(N)} mês(es) + meta…</div>`;
-  // GRAVAÇÃO atômica (writes-only numa runTransaction). plan.meta SEM schemaVersion.
-  try{
-    await runTransaction(db,async(tx)=>{
-      for(const m of plan.meses){ tx.set(doc(db,"conciliacao",monthDocId(m.mes)),{sales:m.sales,bank:m.bank}); }
-      tx.set(doc(db,"conciliacao",metaDocId),plan.meta);
-    });
-  }catch(e){
-    console.error("[executeBackfill] falha na transação:",e?.code,e?.message);
-    red(`Falha ao gravar: ${escHtml(e?.message||e?.code||"erro desconhecido")}. Nada confirmado.`);
-    return;
-  }
-  // RELEITURA de verificação: getDoc de cada mês e confere contagens contra o plano.
-  const divergencias=[];
-  for(const m of plan.meses){
-    try{
-      const snap=await getDoc(doc(db,"conciliacao",monthDocId(m.mes)));
-      const d=snap.exists()?snap.data():{};
-      const gs=Array.isArray(d.sales)?d.sales.length:0;
-      const gb=Array.isArray(d.bank)?d.bank.length:0;
-      if(gs!==m.salesCount||gb!==m.bankCount) divergencias.push(`${m.mes}: gravado ${gs}v/${gb}c, esperado ${m.salesCount}v/${m.bankCount}c`);
-    }catch(e){ divergencias.push(`${m.mes}: falha na releitura (${e?.code||e?.message||"erro"})`); }
-  }
-  if(divergencias.length){ red(`Verificação encontrou ${escHtml(divergencias.length)} mês(es) divergente(s): ${escHtml(divergencias.join("; "))}. Confira o Firestore antes de prosseguir.`); return; }
-  // Trilha de auditoria (best-effort, fora da tx): registra o backfill.
-  logAudit("backfill","posto1_meta+meses",{monthsCount:N,salesTotal:t.planSales,bankTotal:t.planBank});
-  green(`Migração concluída: ${escHtml(N)} meses gravados, meta criada (schemaVersion ainda não ligado, modo paginado segue desligado até a Fase 5).`);
-};
-
-// Fase 5 (cutover): liga o modo paginado gravando schemaVersion:1 no posto1_meta.
-// Protegido: só funciona se a Fase 4 real já rodou (meta existe c/ meses) e ainda
-// não está ativo. Só toca o posto1_meta — NÃO toca posto1 legado nem posto1_m_*.
-// Reversível (não apaga nada; remover o legado é a Fase 6). schemaVersion:1 fixo.
-// NÃO força reload, NÃO muda STATE nem paginatedMode em memória — só vale no próximo
-// boot. window.* (handler inline). Dados escapados via escHtml().
-window.activatePaginatedMode=async function(){
-  const el=document.getElementById("backfill-preview");
-  const box=(bg,bd,fg,icon,msg)=>{ if(el) el.innerHTML=`<div class="alert-late" style="background:${bg};border-color:${bd};color:${fg};margin-top:12px">${icon} ${msg}</div>`; };
-  const red=(msg)=>box("#1a0010","#e91e8c40","#f48fb1","⛔",msg);
-  const amber=(msg)=>box("#1a1400","#d4a01740","#e6c34a","⚠️",msg);
-  const green=(msg)=>box("#06160c","#1f7a3f","#7be0a3","✅",msg);
-  const metaRef=doc(db,"conciliacao",metaDocId);
-  // a. Lê o meta.
-  let snap;
-  try{ snap=await getDoc(metaRef); }
-  catch(e){ red(`Falha ao ler meta: ${escHtml(e?.message||e?.code||"erro desconhecido")}.`); return; }
-  // TRAVA A — meta não existe.
-  if(!snap.exists()){ red("posto1_meta não encontrado. Rode a migração (Executar migração) primeiro."); return; }
-  const meta=snap.data();
-  // TRAVA B — sem meses.
-  if(!Array.isArray(meta.months)||meta.months.length===0){ red("Meta sem meses. Migração incompleta ou banco vazio."); return; }
-  // TRAVA C — já ativo.
-  if(meta.schemaVersion){ amber(`Modo paginado já está ativo (schemaVersion=${escHtml(meta.schemaVersion)}). Nada a fazer.`); return; }
-  // TRAVA D — confirmação.
-  if(!confirm("Isto ativa o modo paginado no próximo carregamento. O app passará a ler os dados por mês; o posto1 legado vira fallback. Confirma?")) return;
-  // GRAVAÇÃO: relê o meta na transação e regrava o objeto inteiro + schemaVersion:1.
-  try{
-    await runTransaction(db,async(tx)=>{
-      const s=await tx.get(metaRef);
-      const cur=s.exists()?s.data():{};
-      tx.set(metaRef,{...cur,schemaVersion:1});
-    });
-  }catch(e){
-    console.error("[activatePaginatedMode] falha:",e?.code,e?.message);
-    red(`Falha ao ativar: ${escHtml(e?.message||e?.code||"erro desconhecido")}. Nada mudou.`);
-    return;
-  }
-  // Trilha de auditoria (best-effort, fora da tx): registra o cutover.
-  logAudit("cutover","posto1_meta",{schemaVersion:1});
-  green("Modo paginado ATIVADO (schemaVersion=1). RECARREGUE a página para o app entrar no modo paginado. O posto1 legado continua intacto como fallback.");
-};
-
-// Migração MÊS → DIA: reparticiona os docs mensais (posto1_m_*) em day-docs
-// (posto1_d_YYYY-MM-DD) e regrava o meta com o índice de DIAS + schemaVersion:2.
-// Fonte = os próprios month-docs (verdade atual pós-cutover mensal), NÃO o legado
-// (que perderia edições feitas depois do cutover). Registros com date inválido TRAVAM
-// a migração antes de gravar (day-doc exige id com date YYYY-MM-DD; nunca descartados
-// silenciosamente). UMA transação atômica (writes) + releitura de verificação por dia.
-// NÃO apaga os _m_ (fallback). NÃO muda STATE nem paginatedMode em memória — só vale
-// no próximo boot. Idempotente (tx.set substitui o day-doc inteiro). window.* (handler inline).
-window.migrateMonthToDay=async function(){
-  const el=document.getElementById("m2d-preview");
-  const box=(bg,bd,fg,icon,msg)=>{ if(el) el.innerHTML=`<div class="alert-late" style="background:${bg};border-color:${bd};color:${fg};margin-top:12px">${icon} ${msg}</div>`; };
-  const red=(msg)=>box("#1a0010","#e91e8c40","#f48fb1","⛔",msg);
-  const amber=(msg)=>box("#1a1400","#d4a01740","#e6c34a","⚠️",msg);
-  const green=(msg)=>box("#06160c","#1f7a3f","#7be0a3","✅",msg);
-  const metaRef=doc(db,"conciliacao",metaDocId);
-  // a. Lê o meta (precisa existir do cutover mensal, com índice de meses).
-  let metaSnap;
-  try{ metaSnap=await getDoc(metaRef); }
-  catch(e){ red(`Falha ao ler meta: ${escHtml(e?.message||e?.code||"erro desconhecido")}.`); return; }
-  if(!metaSnap.exists()){ red("posto1_meta não encontrado. Não há paginação mensal para converter."); return; }
-  const meta=metaSnap.data();
-  // TRAVA A — já está em modo diário (schemaVersion>=2).
-  if(Number(meta.schemaVersion)>=2){ amber(`Já está em modo diário (schemaVersion=${escHtml(meta.schemaVersion)}). Nada a fazer.`); return; }
-  // Lista de meses a converter: índice de meses do meta; se ausente, cai p/ o STATE.
-  const meses=Array.isArray(meta.months)?meta.months.map(x=>x.mes).filter(Boolean):[];
-  if(el) el.innerHTML=`<div style="margin-top:12px;color:var(--muted);font-size:12px">⏳ Lendo ${escHtml(meses.length)} mês(es)…</div>`;
-  // b. Lê cada month-doc e agrega TODOS os registros (fonte da conversão).
-  const allSales=[], allBank=[];
-  try{
-    for(const mes of meses){
-      const snap=await getDoc(doc(db,"conciliacao",monthDocId(mes)));
-      const d=snap.exists()?snap.data():{};
-      if(Array.isArray(d.sales)) allSales.push(...d.sales);
-      if(Array.isArray(d.bank))  allBank.push(...d.bank);
-    }
-  }catch(e){ red(`Falha ao ler docs mensais: ${escHtml(e?.message||e?.code||"erro desconhecido")}.`); return; }
-  // c. Reparticiona por DIA (date, YYYY-MM-DD). O day-doc id precisa casar com a
-  // regex das rules (_d_[0-9]{4}-[0-9]{2}-[0-9]{2}); um id "sem-data" seria NEGADO
-  // e derrubaria a transação inteira. Por isso: registros com date inválido travam
-  // a migração ANTES de gravar (nunca descartados silenciosamente) — o operador
-  // corrige a origem e roda de novo. Na prática date é sempre válido (normSale/normBank).
-  const _DATE=/^\d{4}-\d{2}-\d{2}$/;
-  const invSales=allSales.filter(s=>!_DATE.test(partitionDay(s)||"")).length;
-  const invBank=allBank.filter(b=>!_DATE.test(partitionDay(b)||"")).length;
-  if(invSales||invBank){ red(`Existem registros com date inválido (${escHtml(invSales)} venda(s), ${escHtml(invBank)} crédito(s)). Corrija-os antes de migrar — day-docs exigem date YYYY-MM-DD. Nada foi gravado.`); return; }
-  const byDay=new Map();
-  const bucket=(dia)=>{ if(!byDay.has(dia))byDay.set(dia,{sales:[],bank:[]}); return byDay.get(dia); };
-  allSales.forEach(s=>{ bucket(partitionDay(s)).sales.push(s); });
-  allBank.forEach(b=>{ bucket(partitionDay(b)).bank.push(b); });
-  const dias=[...byDay.entries()]
-    .map(([dia,dd])=>({dia,sales:dd.sales,bank:dd.bank,salesCount:dd.sales.length,bankCount:dd.bank.length}))
-    .sort((a,b)=>a.dia.localeCompare(b.dia));
-  // TRAVA B — nada a migrar.
-  if(dias.length===0){ amber("Nenhum registro nos docs mensais. Nada a converter."); return; }
-  // Índice de dias p/ o meta.
-  const daysIdx=dias.map(x=>({dia:x.dia,salesCount:x.salesCount,bankCount:x.bankCount}));
-  const planSales=dias.reduce((a,x)=>a+x.salesCount,0);
-  const planBank=dias.reduce((a,x)=>a+x.bankCount,0);
-  // TRAVA C — confirmação explícita.
-  if(!confirm(`Isto vai gravar ${dias.length} day-doc(s) + meta (schemaVersion:2). Os docs mensais NÃO serão apagados. Continuar?`)) return;
-  if(el) el.innerHTML=`<div style="margin-top:12px;color:var(--muted);font-size:12px">⏳ Gravando ${escHtml(dias.length)} dia(s) + meta…</div>`;
-  // d. GRAVAÇÃO atômica: cada day-doc + meta (config/mdr preservados; days + sv:2).
-  const newMeta={schemaVersion:2,config:meta.config,mdr:meta.mdr,days:daysIdx};
-  try{
-    await runTransaction(db,async(tx)=>{
-      for(const x of dias){ tx.set(doc(db,"conciliacao",dayDocId(x.dia)),{sales:x.sales,bank:x.bank}); }
-      tx.set(metaRef,newMeta);
-    });
-  }catch(e){
-    console.error("[migrateMonthToDay] falha na transação:",e?.code,e?.message);
-    red(`Falha ao gravar: ${escHtml(e?.message||e?.code||"erro desconhecido")}. Nada confirmado.`);
-    return;
-  }
-  // e. RELEITURA de verificação: getDoc de cada day-doc e confere contagens.
-  const divergencias=[];
-  for(const x of dias){
-    try{
-      const snap=await getDoc(doc(db,"conciliacao",dayDocId(x.dia)));
-      const d=snap.exists()?snap.data():{};
-      const gs=Array.isArray(d.sales)?d.sales.length:0;
-      const gb=Array.isArray(d.bank)?d.bank.length:0;
-      if(gs!==x.salesCount||gb!==x.bankCount) divergencias.push(`${x.dia}: gravado ${gs}v/${gb}c, esperado ${x.salesCount}v/${x.bankCount}c`);
-    }catch(e){ divergencias.push(`${x.dia}: falha na releitura (${e?.code||e?.message||"erro"})`); }
-  }
-  if(divergencias.length){ red(`Verificação encontrou ${escHtml(divergencias.length)} dia(s) divergente(s): ${escHtml(divergencias.join("; "))}. Confira o Firestore antes de prosseguir.`); return; }
-  // f. Trilha de auditoria (best-effort, fora da tx): registra a migração.
-  logAudit("migrate_m2d","posto1_meta+dias",{daysCount:dias.length,salesTotal:planSales,bankTotal:planBank});
-  green(`Migração mês→dia concluída: ${escHtml(dias.length)} day-doc(s) gravados (${escHtml(planSales)} vendas / ${escHtml(planBank)} créditos), meta com schemaVersion:2. RECARREGUE a página para entrar no modo diário. Os docs mensais seguem intactos como fallback.`);
-};
 
 // Recongela expectedDate de todas as vendas com a config atual (prazos/feriados).
 window.recalcExpectedDates=function(){
@@ -2445,54 +2244,39 @@ window.exportBackupJSON=async function(){
   const orig=btn?btn.textContent:"";
   if(btn){ btn.disabled=true; btn.textContent="⏳ Exportando..."; }
   try{
-    // Lê fresco do Firestore (fonte da verdade), não da STATE em memória. REDE DE
-    // SEGURANÇA: no modo diário (schemaVersion>=2) o backup NÃO pode congelar no
-    // doc legado (parado no cutover) — precisa refletir a BASE COMPLETA ATUAL. Então
-    // lê o meta + TODOS os day-docs do índice e agrega numa base consolidada
-    // {sales,bank,mdr,config} (mesmo formato do backup legado). No modo legado (sv<2 /
-    // sem meta) mantém exatamente o comportamento histórico (lê o doc posto1).
-    const metaSnap=await getDoc(doc(db,"conciliacao",metaDocId));
+    // Backup do posto ATIVO. Lê fresco do Firestore (fonte da verdade), não da STATE.
+    // REDE DE SEGURANÇA: agrega o meta + TODOS os day-docs do índice numa base
+    // consolidada {sales,bank,mdr,config} → reflete a BASE COMPLETA ATUAL (não congela).
+    // Somente leitura. Modelo legado removido → sempre modo diário (sv>=2).
+    const metaSnap=await getDoc(doc(db,"conciliacao",metaDocId()));
     const meta=metaSnap.exists()?metaSnap.data():null;
     const sv=meta?Number(meta.schemaVersion)||0:0;
-    let backup;
-    if(meta&&sv>=2){
-      const dias=Array.isArray(meta.days)?meta.days.map(x=>x.dia).filter(Boolean):[];
-      const allSales=[],allBank=[];
-      for(const dia of dias){
-        const s=await getDoc(doc(db,"conciliacao",dayDocId(dia)));
-        const dd=s.exists()?backupSerialize(s.data()):{};
-        if(Array.isArray(dd.sales)) allSales.push(...dd.sales);
-        if(Array.isArray(dd.bank))  allBank.push(...dd.bank);
-      }
-      const consolidated={sales:allSales,bank:allBank,mdr:backupSerialize(meta.mdr),config:backupSerialize(meta.config)};
-      backup={
-        exported_at:new Date().toISOString(),
-        project:"conciliacao-posto",
-        version:2,
-        mode:"paginated-daily",
-        counts:{ documentos:dias.length, dias:dias.length, vendas:allSales.length, extrato:allBank.length },
-        // meta (real) + base consolidada sob DOC_ID (todos os registros dos day-docs).
-        collections:{ conciliacao:{ [metaDocId]:backupSerialize(meta), [DOC_ID]:consolidated } }
-      };
-    }else{
-      const snap=await getDoc(doc(db,"conciliacao",DOC_ID));
-      const data=snap.exists()?backupSerialize(snap.data()):{};
-      const sales=Array.isArray(data.sales)?data.sales:[];
-      const bank=Array.isArray(data.bank)?data.bank:[];
-      backup={
-        exported_at:new Date().toISOString(),
-        project:"conciliacao-posto",
-        version:1,
-        counts:{ documentos:snap.exists()?1:0, vendas:sales.length, extrato:bank.length },
-        collections:{ conciliacao:{ [DOC_ID]:data } }
-      };
+    if(!meta||sv<2){ showMsg("backup-msg",`Meta do posto ${activePosto} não encontrado (sv>=2). Backup abortado.`,"err"); return; }
+    const dias=Array.isArray(meta.days)?meta.days.map(x=>x.dia).filter(Boolean):[];
+    const allSales=[],allBank=[];
+    for(const dia of dias){
+      const s=await getDoc(doc(db,"conciliacao",dayDocId(dia)));
+      const dd=s.exists()?backupSerialize(s.data()):{};
+      if(Array.isArray(dd.sales)) allSales.push(...dd.sales);
+      if(Array.isArray(dd.bank))  allBank.push(...dd.bank);
     }
+    const consolidated={sales:allSales,bank:allBank,mdr:backupSerialize(meta.mdr),config:backupSerialize(meta.config)};
+    const backup={
+      exported_at:new Date().toISOString(),
+      project:"conciliacao-posto",
+      posto:activePosto,
+      version:2,
+      mode:"paginated-daily",
+      counts:{ documentos:dias.length, dias:dias.length, vendas:allSales.length, extrato:allBank.length },
+      // meta (real) + base consolidada sob o id do posto ativo (todos os day-docs).
+      collections:{ conciliacao:{ [metaDocId()]:backupSerialize(meta), [activePosto]:consolidated } }
+    };
 
     const json=JSON.stringify(backup,null,2);
     const url=URL.createObjectURL(new Blob([json],{type:"application/json"}));
     const a=document.createElement("a");
     a.href=url;
-    a.download=`conciliacao-posto-backup-${backupStamp()}.json`;
+    a.download=`conciliacao-${activePosto}-backup-${backupStamp()}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
