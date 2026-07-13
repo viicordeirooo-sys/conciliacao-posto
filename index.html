@@ -389,8 +389,63 @@ const DEFAULT_MDR = {
   "Outro":     {"Débito":0,   "Crédito À Vista":0,   "Crédito 2–6x":0,   "Crédito 7–12x":0,   "Voucher (VR/VA)":0,"Pix":0},
 };
 
+// ─── Perfis de conciliação (multi-posto) ─────────────────────────────────────
+// Cada posto pode ter parser de vendas, parser de extrato, classificador de
+// lançamentos e modelo de matching próprios — declarados num PERFIL guardado
+// dentro de config no postoN_meta (rules v7 intactas: config é `map`, sem
+// checagem de chaves internas). profileFor() resolve config.profile ou o default
+// PagBank (retrocompat: meta legado sem profile opera idêntico ao de hoje).
+//
+// Categorias do classificador de extrato (Bloco 1). "desconhecido" é SÓ fallback
+// (descrição sem regra) — nunca se classifica silenciosamente como venda.
+const BANK_CATS = ["venda_pix","venda_cartao_resumo","antecipacao","tarifa","nao_venda","desconhecido"];
+const PROFILE_PARSERS_VENDAS = ["pagbank-pdf","safrapay-xlsx"];
+const PROFILE_PARSERS_EXTRATO = ["pagbank-xlsx","safra-pdf","manual"];
+
+// Perfil DEFAULT (PagBank / Aruana) — Modelo A: match 1:1 por valor (a descrição
+// do PagBank é livre, então o classificador só EXCLUI "Rendimento" como nao_venda;
+// o resto segue elegível ao match por valor → comportamento atual preservado).
+const DEFAULT_PROFILE = {
+  id:"pagbank-1para1",
+  label:"PagBank (1:1)",
+  vendas:{ parser:"pagbank-pdf" },
+  extrato:{
+    parsers:["pagbank-xlsx"],
+    classificacao:[ {cat:"nao_venda",match:["RENDIMENTO"]} ],
+    fallback:"desconhecido",
+  },
+  matching:{ modelo:"A" },
+};
+
+// Perfil KAFISSO (Banco Safra + SafraPay) — Modelo B (misto). Classificação
+// ORDENADA (primeira regra que casa vence): venda_pix ANTES do nao_venda genérico
+// "PIX RECEBIDO"; tarifas primeiro. Strings confirmadas no PDF real (período 01–13/07).
+const PROFILE_SAFRA = {
+  id:"safra-safrapay",
+  label:"Banco Safra + SafraPay",
+  vendas:{ parser:"safrapay-xlsx" },
+  extrato:{
+    parsers:["safra-pdf","manual"],
+    classificacao:[
+      {cat:"tarifa",              match:["TAR PIX QR CODE SAFRAPAY","TARIFA PIX ENVIADO","TAR LIQUIDACAO BOLETO COB","PACOTE PJ EMPRESA 1"]},
+      {cat:"venda_pix",           match:["PIX RECEBIDO SAFRAPAY"]},
+      {cat:"venda_cartao_resumo", match:["RESUMO VENDAS CARTAO DEB","RESUMO VENDAS CARTAO CRED"]},
+      {cat:"antecipacao",         match:["ANTECIPACAO RV"]},
+      {cat:"nao_venda",           match:["PIX RECEBIDO TRANSF","PIX RECEBIDO","TED E RECEBIDA","CREDITO COBRANCA RESERVA","PIX ENVIADO REGULARIZADO","PIX ENVIADO TRANSF","PIX ENVIADO","PIX QR DINAMICO PAGO","PAGAMENTO DE BOLETO","PAGTO ENERGIA/GAS","PGTO CONTA TELEFONE","TED ENVIADA OUTRA TIT"]},
+    ],
+    fallback:"desconhecido",
+  },
+  matching:{
+    modelo:"B",
+    pix:{ chave:"bruto" },                 // Pix casa por valor BRUTO (crédito individual D+0)
+    cartao:{ chave:"liquido", tolerance:null },   // Σ liquidoReal ↔ resumo; null → usa config.tolerance
+    antecipacao:{ taxa:0.0176 },           // ANTECIPACAO RV = Σ líquido crédito D-1 × (1 − taxa)
+  },
+};
+
 const DEFAULT_CONFIG = {
   postoName:"Posto 1",
+  profile:DEFAULT_PROFILE,   // perfil PagBank; postos novos podem trocar (Kafisso → PROFILE_SAFRA)
   // Prazos default vêm de MODALITIES (Débito D+1, Crédito D+30 corridos,
   // Voucher D+1, Pix D+0). Antes eram 0 → tudo liquidava no mesmo dia,
   // inclusive crédito. Config já salva no Firestore prevalece no merge.
@@ -567,12 +622,54 @@ window.clampTaxaMdr=function(v){
 function sanitizeConfig(cfg){
   const liq={};
   MODALITIES.forEach(m=>{ liq[m.name]=clampDiasLiq(cfg.liquidation?.[m.name],m.d); });
-  return {...cfg, tolerance:clampTolerancia(cfg.tolerance), liquidation:liq};
+  return {...cfg, tolerance:clampTolerancia(cfg.tolerance), liquidation:liq, profile:sanitizeProfile(cfg.profile)};
 }
 function sanitizeMdr(mdr){
   const out={};
   BANDEIRAS.forEach(b=>{ out[b]={}; MODALITIES.forEach(m=>{ out[b][m.name]=clampTaxaMdr(mdr?.[b]?.[m.name]); }); });
   return out;
+}
+
+// Resolve o perfil de conciliação de uma config: usa config.profile (saneado) ou
+// o DEFAULT_PROFILE (PagBank). Ponto único p/ os blocos (classificador/matchers)
+// obterem o perfil sem repetir fallback. Inerte no commit 1 (ainda ninguém chama).
+function profileFor(cfg){ return sanitizeProfile(cfg?.profile); }
+
+// Saneia o perfil DEPOIS do merge (defense in depth, R2): perfil é `map` livre nas
+// rules, então um doc envenenado não pode entrar cru no STATE. Cai no DEFAULT_PROFILE
+// se ausente/ inválido. NUNCA deixa fallback virar "venda". Objetos NOVOS (não muta
+// os DEFAULT_* por referência). Limites sãos (contra payload absurdo).
+function sanitizeProfile(p){
+  if(!isPlainObject(p)) return DEFAULT_PROFILE;
+  const str=(v,max)=>String(v??"").slice(0,max);
+  const vParser=PROFILE_PARSERS_VENDAS.includes(p.vendas?.parser)?p.vendas.parser:DEFAULT_PROFILE.vendas.parser;
+  const eParsers=(Array.isArray(p.extrato?.parsers)?p.extrato.parsers:[])
+    .filter(x=>PROFILE_PARSERS_EXTRATO.includes(x)).slice(0,8);
+  const cls=(Array.isArray(p.extrato?.classificacao)?p.extrato.classificacao:[])
+    .slice(0,100)
+    .map(r=>({
+      cat: BANK_CATS.includes(r?.cat)&&r.cat!=="desconhecido" ? r.cat : "nao_venda",
+      match:(Array.isArray(r?.match)?r.match:[]).slice(0,50).map(s=>str(s,120)).filter(Boolean),
+    }))
+    .filter(r=>r.match.length);
+  const fb=(p.extrato?.fallback==="nao_venda")?"nao_venda":"desconhecido"; // nunca "venda"
+  const modelo=(p.matching?.modelo==="B")?"B":"A";
+  const taxaRaw=Number(p.matching?.antecipacao?.taxa);
+  const taxa=Number.isFinite(taxaRaw)?Math.min(Math.max(taxaRaw,0),1):(DEFAULT_PROFILE.matching.antecipacao?.taxa??0);
+  const cartTolRaw=p.matching?.cartao?.tolerance;
+  const cartTol=(cartTolRaw==null)?null:clampTolerancia(cartTolRaw); // null → herda config.tolerance
+  return {
+    id:str(p.id,60)||DEFAULT_PROFILE.id,
+    label:str(p.label,80)||DEFAULT_PROFILE.label,
+    vendas:{ parser:vParser },
+    extrato:{ parsers:eParsers.length?eParsers:[...DEFAULT_PROFILE.extrato.parsers], classificacao:cls, fallback:fb },
+    matching:{
+      modelo,
+      pix:{ chave:(p.matching?.pix?.chave==="liquido")?"liquido":"bruto" },
+      cartao:{ chave:(p.matching?.cartao?.chave==="bruto")?"bruto":"liquido", tolerance:cartTol },
+      antecipacao:{ taxa },
+    },
+  };
 }
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
