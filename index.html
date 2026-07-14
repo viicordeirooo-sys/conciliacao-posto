@@ -436,7 +436,7 @@ const PROFILE_SAFRA = {
       {cat:"venda_pix",           match:["PIX RECEBIDO SAFRAPAY"]},
       {cat:"venda_cartao_resumo", match:["RESUMO VENDAS CARTAO DEB","RESUMO VENDAS CARTAO CRED"]},
       {cat:"antecipacao",         match:["ANTECIPACAO RV"]},
-      {cat:"nao_venda",           match:["PIX RECEBIDO TRANSF","PIX RECEBIDO","TED E RECEBIDA","CREDITO COBRANCA RESERVA","PIX ENVIADO REGULARIZADO","PIX ENVIADO TRANSF","PIX ENVIADO","PIX QR DINAMICO PAGO","PAGAMENTO DE BOLETO","PAGTO ENERGIA/GAS","PGTO CONTA TELEFONE","TED ENVIADA OUTRA TIT"]},
+      {cat:"nao_venda",           match:["PIX RECEBIDO TRANSF","PIX RECEBIDO","TED E RECEBIDA","CREDITO COBRANCA RESERVA","PIX ENVIADO REGULARIZADO","PIX ENVIADO TRANSF","PIX ENVIADO","PIX QR DINAMICO PAGO","PAGAMENTO DE BOLETO","PAGTO ENERGIA","PGTO CONTA TELEFONE","TED ENVIADA OUTRA TIT"]},
     ],
     fallback:"desconhecido",
   },
@@ -2051,6 +2051,18 @@ let eForm={date:todays(),description:"",amount:""};
 
 function renderExtrato(){
   const totalDia=STATE.bank.filter(e=>e.date===eForm.date).reduce((a,e)=>a+Number(e.amount),0);
+  // Botões de import por perfil (Bloco 2): Safra → PDF do extrato; PagBank → XLSX.
+  const eparsers=profileFor(STATE.config).extrato.parsers||[];
+  const importBtns=[
+    eparsers.includes("safra-pdf")?`<label class="btn btn-dark" style="cursor:pointer">
+          📄 Importar PDF Safra
+          <input type="file" accept=".pdf" style="display:none" onchange="importExtratoSafraPDF(this)">
+        </label>`:"",
+    eparsers.includes("pagbank-xlsx")?`<label class="btn btn-dark" style="cursor:pointer">
+          📊 Importar XLSX PagBank
+          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importXLSX(this)">
+        </label>`:"",
+  ].join("");
   const rows=STATE.bank.map(e=>`<tr>
     <td>${fmtDate(e.date)}</td>
     <td style="color:var(--muted)">${escHtml(e.description)||"—"}</td>
@@ -2073,10 +2085,7 @@ function renderExtrato(){
       ${totalDia>0?`<div style="font-size:12px;color:var(--muted);margin-top:8px">Total em ${fmtDate(eForm.date)}: <strong style="color:var(--blue)">${fmtBRL(totalDia)}</strong></div>`:""}
       <div class="btn-row">
         <button class="btn" onclick="addBank()">+ Adicionar</button>
-        <label class="btn btn-dark" style="cursor:pointer">
-          📊 Importar XLSX PagBank
-          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importXLSX(this)">
-        </label>
+        ${importBtns}
         <span id="extrato-msg"></span>
       </div>
     </div>
@@ -2242,6 +2251,54 @@ function parseSafraVendasRows(rows,map,profile){
   return {imported,skipped,suspeitos};
 }
 
+// ── Parser do PDF do extrato Banco Safra (Bloco 2) — puros/testáveis ────────────
+// pdfmake gera camada de texto limpa. Reconstrói LINHAS por posição: agrupa itens
+// do pdf.js por y (arredondado), ordena por x. Diferente do PagBank (dump [n]).
+function reconstructPdfLines(items){
+  const byY=new Map();
+  items.forEach(it=>{ if(!it.str||!it.str.trim())return; const y=Math.round(it.transform[5]); const x=it.transform[4]; if(!byY.has(y))byY.set(y,[]); byY.get(y).push({x,str:it.str.trim()}); });
+  return [...byY.entries()].sort((a,b)=>b[0]-a[0]).map(([y,arr])=>({y,items:arr.sort((a,b)=>a.x-b.x)}));
+}
+const _SAFRA_MONEY=/^-?\d{1,3}(\.\d{3})*,\d{2}$/, _SAFRA_DDMM=/^(\d{2})\/(\d{2})$/;
+// Ano do extrato via "Período de dd/mm/yyyy a dd/mm/yyyy". Trata virada de ano por mês.
+function _safraDerivePeriodo(lines){
+  for(const ln of lines){ const s=ln.items.map(t=>t.str).join(" "); const m=s.match(/(\d{2})\/(\d{2})\/(\d{4}).*?(\d{2})\/(\d{2})\/(\d{4})/); if(m) return {sM:+m[2],sY:+m[3],eM:+m[5],eY:+m[6]}; }
+  return null;
+}
+function _safraYearFor(mm,per){ if(!per) return new Date().getFullYear(); if(per.sY===per.eY) return per.sY; return (mm>=per.sM)?per.sY:per.eY; }
+// Linhas reconstruídas → créditos (armazenados) + contagem de débitos/tarifas (v1: só
+// crédito é armazenado). Rules: (a) data em x<50 + valor em x>420; (b) linha sem os
+// dois = continuação → pula; (c) SALDO TOTAL/INICIAL descartado; (d) NÃO usa a coluna
+// Nº Documento (nome longo não quebra — âncora só em data-início/valor-fim).
+function parseSafraExtratoPDF(lines,profile){
+  const per=_safraDerivePeriodo(lines);
+  const imported=[]; let skipped=0; const seqDia={};
+  const debitos={count:0,total:0}; const tarifas={count:0,total:0}; const byCat={};
+  for(const ln of lines){
+    const dateItem=ln.items.find(t=>t.x<50 && _SAFRA_DDMM.test(t.str));
+    const valItem=[...ln.items].reverse().find(t=>t.x>420 && _SAFRA_MONEY.test(t.str));
+    if(!dateItem||!valItem) continue;                          // (a)/(b)
+    const lanc=ln.items.filter(t=>t.x>=55&&t.x<244).map(t=>t.str).join(" ").trim();
+    if(/^saldo/i.test(lanc)) continue;                          // (c)
+    const comp=ln.items.filter(t=>t.x>=244&&t.x<420).map(t=>t.str).join(" ").trim();
+    const value=parseBRLNumber(valItem.str);
+    if(!Number.isFinite(value)){ skipped++; continue; }
+    const dm=dateItem.str.match(_SAFRA_DDMM), dd=dm[1], mm=dm[2];
+    const iso=`${_safraYearFor(+mm,per)}-${mm}-${dd}`;
+    const description=(lanc+" "+comp).replace(/\s+/g," ").trim().slice(0,200);
+    const cat=classifyBank(description,profile);
+    byCat[cat]=(byCat[cat]||0)+1;
+    if(value>0){
+      const s=(seqDia[iso]=(seqDia[iso]||0)+1)-1;               // seq POR DIA (idempotente em re-import)
+      imported.push({id:uid(),extId:`safra_${iso}_${s}_${value}`,date:iso,description,amount:value});
+    } else if(value<0){
+      debitos.count++; debitos.total=round2(debitos.total+value);
+      if(cat==="tarifa"){ tarifas.count++; tarifas.total=round2(tarifas.total+value); }
+    } else { skipped++; }
+  }
+  return {imported,skipped,debitos,tarifas,byCat};
+}
+
 // XLSX importer for PagBank bank statement
 window.importXLSX=function(input){
   const file=input.files[0]; if(!file) return;
@@ -2361,6 +2418,61 @@ window.importVendasSafraXLSX=function(input){
       }
     }catch(err){
       showMsg("venda-msg","Erro ao ler XLSX: "+err.message,"err");
+    }
+    input.value="";
+  };
+  reader.readAsArrayBuffer(file);
+};
+
+// PDF importer for Banco Safra bank statement (extrato). Espelha importPDF no
+// carregamento do pdf.js; reconstrói linhas por posição e chama parseSafraExtratoPDF.
+window.importExtratoSafraPDF=function(input){
+  const file=input.files[0]; if(!file) return;
+  if(file.type&&file.type!=="application/pdf"){
+    showMsg("extrato-msg","Arquivo inválido. Selecione um PDF.","err");
+    input.value=""; return;
+  }
+  if(file.size>MAX_FILE_SIZE){
+    showMsg("extrato-msg","Arquivo muito grande (máx. 10 MB).","err");
+    input.value=""; return;
+  }
+  showMsg("extrato-msg","⏳ Lendo PDF Safra...","ok");
+  const reader=new FileReader();
+  reader.onload=async function(e){
+    try{
+      if(!window.pdfjsLib){
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+          s.onload=res; s.onerror=rej;
+          document.head.appendChild(s);
+        });
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+      const pdf=await pdfjsLib.getDocument({data:e.target.result}).promise;
+      const lines=[];
+      for(let i=1;i<=pdf.numPages;i++){
+        const page=await pdf.getPage(i);
+        const content=await page.getTextContent();
+        lines.push(...reconstructPdfLines(content.items));
+      }
+      const {imported,skipped,debitos,tarifas}=parseSafraExtratoPDF(lines,profileFor(STATE.config));
+      if(imported.length===0){
+        showMsg("extrato-msg",skipped>0?`Nenhum crédito válido. ${skipped} linha(s) ambígua(s) — confira o leiaute do PDF.`:"Nenhum lançamento de crédito encontrado no PDF.","err");
+        input.value=""; return;
+      }
+      const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
+      const news=imported.filter(e=>!existingIds.has(e.extId));
+      STATE.bank=[...news,...STATE.bank];
+      saveToFirebase();
+      if(skipped>0) console.warn(`[importExtratoSafraPDF] ${skipped} linha(s) ambígua(s) ignorada(s).`);
+      renderExtrato();
+      // Resumo pós-import (nada de balde silencioso): créditos + débitos ignorados (v1)
+      // com contagem de tarifas Pix separada.
+      const dbg=debitos.count>0?` ${debitos.count} débito(s) ignorado(s) (${fmtBRL(debitos.total)}), inclui ${tarifas.count} tarifa(s) Pix.`:"";
+      showMsg("extrato-msg",`✅ ${news.length} créditos importados! (${imported.length-news.length} duplicatas)${dbg}`,"ok");
+    }catch(err){
+      showMsg("extrato-msg","Erro ao ler PDF: "+err.message,"err");
     }
     input.value="";
   };
