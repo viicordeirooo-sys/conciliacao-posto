@@ -2174,7 +2174,7 @@ function mapSafraVendasColumns(rows){
     const dataVenda=find("data da venda"), modalidade=find("modalidade"), valorBruto=find("valor bruto");
     if(dataVenda>=0&&modalidade>=0&&valorBruto>=0){
       return { headerRow:r, dataVenda, modalidade, valorBruto,
-        valorLiquido:find("valor liquido"), bandeira:find("bandeira","arranjo"), nsu:find("nsu"), parcela:find("parcela") };
+        valorLiquido:find("valor liquido"), bandeira:find("bandeira","arranjo"), nsu:find("nsu","sequencial"), parcela:find("parcela") };
     }
   }
   return null;
