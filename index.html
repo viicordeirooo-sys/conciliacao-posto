@@ -746,6 +746,20 @@ function addBusinessDays(dateStr,n,holidays){
   return d.toISOString().slice(0,10);
 }
 
+// Próximo dia útil INCLUSIVO: se dateStr já é dia útil, devolve ele; senão avança
+// até o 1º dia útil. Usado no Pix SafraPay: o crédito de fim de semana/feriado cai
+// na conta só no próximo dia útil (o extrato Safra não tem lançamento em fds).
+function nextBusinessDay(dateStr,holidays){
+  const hs=new Set(holidays);
+  let d=new Date(dateStr+"T12:00:00");
+  for(let i=0;i<14;i++){
+    const dw=d.getDay(),ds=d.toISOString().slice(0,10);
+    if(dw!==0&&dw!==6&&!hs.has(ds))return ds;
+    d.setDate(d.getDate()+1);
+  }
+  return dateStr;
+}
+
 function addCalendarDays(dateStr,n){
   if(n===0)return dateStr;
   const d=new Date(dateStr+"T12:00:00");
@@ -2240,7 +2254,9 @@ function parseSafraVendasRows(rows,map,profile){
     if(!mod){ skipped++; continue; }                      // modalidade desconhecida → nunca chuta
     const bandeira=mod.liqKey==="pix"?"Pix":mapSafraBandeira(map.bandeira>=0?row[map.bandeira]:"");
     const nsu=map.nsu>=0?String(row[map.nsu]||"").trim():"";
-    const expectedDate=addBusinessDays(iso,safraPrazo(mod.liqKey,profile),holidays);
+    // Pix: crédito cai no próximo dia útil (fds/feriado rola p/ o dia útil seguinte);
+    // demais modalidades: D+n úteis a partir da venda.
+    const expectedDate=mod.liqKey==="pix"?nextBusinessDay(iso,holidays):addBusinessDays(iso,safraPrazo(mod.liqKey,profile),holidays);
     const sale={id:uid(),extId:`sp_${iso}_${nsu}_${bruto}`.replace(/\s/g,"_"),date:iso,bandeira,modality:mod.modality,amount:bruto,expectedDate};
     if(mod.sub) sale.sub=mod.sub;
     const liq=map.valorLiquido>=0?parseBRLNumber(row[map.valorLiquido]):NaN;
