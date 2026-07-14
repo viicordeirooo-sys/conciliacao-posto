@@ -672,6 +672,16 @@ function sanitizeProfile(p){
   };
 }
 
+// Perfis embutidos disponíveis no seletor da Config (por posto).
+const BUILTIN_PROFILES = [DEFAULT_PROFILE, PROFILE_SAFRA];
+// Troca o perfil do posto ATIVO (grava em config.profile). CLONA (não referencia a
+// constante compartilhada). É write de config — sem schema/rules. RBAC já restringe.
+window.setPostoProfile=function(id){
+  const p=BUILTIN_PROFILES.find(x=>x.id===id); if(!p) return;
+  STATE.config.profile=JSON.parse(JSON.stringify(p));
+  saveToFirebase(); renderCurrentTab();
+};
+
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 function getLoginState(){
   return{
@@ -2393,6 +2403,11 @@ function renderConfig(){
         <div style="margin-bottom:14px">
           <label class="lbl">Nome do Posto</label>
           <input type="text" value="${escHtml(STATE.config.postoName)}" onchange="renamePosto(this.value)">
+        </div>
+        <div style="margin-bottom:14px">
+          <label class="lbl">Perfil de conciliação</label>
+          <select onchange="setPostoProfile(this.value)">${BUILTIN_PROFILES.map(p=>`<option value="${p.id}"${profileFor(STATE.config).id===p.id?" selected":""}>${escHtml(p.label)}</option>`).join("")}</select>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">Define parser de vendas/extrato, classificador e modelo de matching. Trocar re-lê os dados já carregados (sem reimport).</div>
         </div>
         <div>
           <label class="lbl">Tolerância de divergência (R$)</label>
