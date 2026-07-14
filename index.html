@@ -1678,6 +1678,7 @@ function matchDayItems(r){
 
 // Monta o painel de detalhe do dia (chamado só p/ o dia aberto).
 function dayDetailHtml(r){
+  if(r._b) return dayDetailHtmlB(r);   // Modelo B: painel por lane (pix 1:1 + cartão total)
   const m=matchDayItems(r);
   const diffColor=Math.abs(r.diff)<.01?"var(--muted)":r.diff>0?"var(--accent)":"var(--red)";
   const diffStr=(r.diff>=0?"+":"")+fmtBRL(r.diff);
@@ -1739,6 +1740,80 @@ function dayDetailHtml(r){
     </div>
     ${noteHtml}
     <div class="detail-legend">✓ igual · ≈ dentro da tolerância (${fmtBRL(m.tol)}) mas com diferença — o chip mostra quanto · ⚠ sem correspondência — o valor à direita é a diferença exata que não bateu.</div>
+  </div>`;
+}
+
+// ── Drill-down Modelo B (SÓ-LEITURA): lane Pix (1:1 estrito) + lane Cartão (total
+// do dia; colunas por agregado ↔ resumo mais próximo, best-effort p/ diagnóstico).
+function matchDayItemsB(r,profile){
+  const tolPix=STATE.config.tolerance;
+  const b=r._b||{};
+  const bank=STATE.bank.filter(e=>e.date===r.date).map(e=>({amount:Number(e.amount),description:e.description,cat:classifyBank(e.description,profile)}));
+  const salesMin=STATE.sales.map(s=>s.date).filter(Boolean).sort()[0]||"";
+  const isPre=salesMin&&r.date<=salesMin;              // espelha o guarda pré-janela do getReconciliationB
+  const pixBank=bank.filter(x=>x.cat==="venda_pix").map(x=>x.amount);
+  const cartAll=bank.filter(x=>x.cat==="venda_cartao_resumo"||x.cat==="antecipacao");
+  const cartBank=isPre?[]:cartAll, preBank=isPre?cartAll:[];
+  const pm=greedyMatchByValue(b.pixExp||[],pixBank,tolPix);
+  // Cartão: nearest-neighbor (cada agregado esperado → resumo mais próximo por valor).
+  const B=cartBank.map((x,i)=>({...x,i,used:false}));
+  const cpairs=[],cexpOnly=[];
+  [...(b.cartItems||[])].sort((a,b)=>b.value-a.value).forEach(e=>{
+    let best=-1,bd=Infinity; B.forEach(x=>{ if(!x.used){ const d=Math.abs(x.amount-e.value); if(d<bd){bd=d;best=x.i;} } });
+    if(best>=0){ const x=B.find(y=>y.i===best); x.used=true; cpairs.push({e,c:x,diff:round2(x.amount-e.value)}); } else cexpOnly.push(e);
+  });
+  return {pm,cpairs,cexpOnly,cbankOnly:B.filter(x=>!x.used),preBank,tolPix};
+}
+function dayDetailHtmlB(r){
+  const profile=profileFor(STATE.config);
+  const b=r._b||{};
+  const m=matchDayItemsB(r,profile);
+  const diffColor=Math.abs(r.diff)<.01?"var(--muted)":r.diff>0?"var(--accent)":"var(--red)";
+  const diffStr=(r.diff>=0?"+":"")+fmtBRL(r.diff);
+  const nPixExp=(b.pixExp||[]).length, nPixBk=(b.pixBk||[]).length;
+  const pixOk=m.pm.aOnly.length===0&&m.pm.bOnly.length===0;
+  const cap=(arr,f)=>arr.slice(0,20).map(f).join("")+(arr.length>20?`<div class="detail-empty">(+${arr.length-20} mais)</div>`:"");
+  const pixBlock=pixOk
+    ? `<div class="detail-empty">✓ Todas as ${nPixExp} transações Pix casaram por valor (bruto).</div>`
+    : cap(m.pm.aOnly,v=>`<div class="match-item match-orphan-sale"><span class="mi-l">⚠ Pix esperado sem crédito</span><span class="mi-r" style="color:var(--red)">${fmtBRL(v)}</span></div>`)
+      +cap(m.pm.bOnly,v=>`<div class="match-item match-orphan-bank"><span class="mi-l">⚠ Pix no banco sem venda</span><span class="mi-r" style="color:var(--purple)">${fmtBRL(v)}</span></div>`);
+  const isTol=p=>Math.abs(p.diff)>=.01;
+  const ordered=[...m.cpairs.filter(isTol),...m.cpairs.filter(p=>!isTol(p))];
+  const cartExpCol=[
+    ...m.cexpOnly.map(e=>`<div class="match-item match-orphan-sale"><span class="mi-l">⚠ ${escHtml(e.label)} (${e.n}) — sem resumo</span><span class="mi-r" style="color:var(--red)">${fmtBRL(e.value)}</span></div>`),
+    ...ordered.map(p=>{ const cls=isTol(p)?"match-tol":"match-ok",mark=isTol(p)?"≈":"✓"; const chip=isTol(p)?`<span class="match-diff">${p.diff>0?"+":""}${fmtBRL(p.diff)}</span>`:""; return `<div class="match-item ${cls}"><span class="mi-l">${mark} ${escHtml(p.e.label)} (${p.e.n})</span><span class="mi-r">${fmtBRL(p.e.value)}${chip}</span></div>`; }),
+  ].join("")||`<div class="detail-empty">Nenhum agregado de cartão.</div>`;
+  const cartBankCol=[
+    ...m.cbankOnly.map(c=>`<div class="match-item match-orphan-bank"><span class="mi-l">⚠ ${escHtml(c.description)||"—"} — sem venda</span><span class="mi-r" style="color:var(--purple)">${fmtBRL(c.amount)}</span></div>`),
+    ...ordered.map(p=>{ const cls=isTol(p)?"match-tol":"match-ok",mark=isTol(p)?"≈":"✓"; return `<div class="match-item ${cls}"><span class="mi-l">${mark} ${escHtml(p.c.description)||"—"}</span><span class="mi-r">${fmtBRL(p.c.amount)}</span></div>`; }),
+  ].join("")||`<div class="detail-empty">Nenhum resumo de cartão no banco.</div>`;
+  const cartColor=b.cartOk?"var(--green)":(b.cartDiff<0?"var(--red)":"var(--accent)");
+  const cartN=m.cpairs.length+m.cbankOnly.length;
+  return `<div class="detail-panel">
+    <div class="detail-head">
+      ${getBadge(r.status)}
+      <span>Esperado: <strong style="color:var(--green)">${fmtBRL(r.liquido)}</strong></span>
+      <span>Banco: <strong style="color:var(--blue)">${fmtBRL(r.actual)}</strong></span>
+      <span>Diferença: <strong style="color:${diffColor}">${diffStr}</strong></span>
+      ${b.nota?`<span style="color:var(--accent)">⚠ ${escHtml(b.nota)}</span>`:""}
+    </div>
+    ${b.preN?`<div class="detail-legend" style="color:var(--purple)">💰 ${b.preN} crédito(s) de cartão de período anterior (${fmtBRL(b.preWin)}) — fora da conciliação (pré-janela).</div>`:""}
+    <div class="sec-title" style="margin:6px 0">Pix — ${nPixExp} esperado / ${nPixBk} no banco · ${pixOk?`<span style="color:var(--green)">✅ conciliado</span>`:`<span style="color:var(--accent)">⚠ ${m.pm.aOnly.length+m.pm.bOnly.length} sem par</span>`}</div>
+    ${pixBlock}
+    <div class="sec-title" style="margin:12px 0 6px">Cartão (total do dia) — esperado ${fmtBRL(b.cartExp)} · banco ${fmtBRL(b.cartBkTot)} · <span style="color:${cartColor}">dif ${(b.cartDiff>=0?"+":"")+fmtBRL(b.cartDiff)}</span> (tol ${fmtBRL(b.cartTol)}) ${b.cartOk?"✅":"⚠"}</div>
+    <div class="detail-cols">
+      <div class="detail-col">
+        <h4>Esperado — agregados (${(b.cartItems||[]).length})</h4>
+        ${cartExpCol}
+        <div class="detail-tot"><span>Total esperado</span><span style="color:var(--green)">${fmtBRL(b.cartExp)}</span></div>
+      </div>
+      <div class="detail-col">
+        <h4>Banco — resumos (${cartN})</h4>
+        ${cartBankCol}
+        <div class="detail-tot"><span>Total banco</span><span style="color:var(--blue)">${fmtBRL(b.cartBkTot)}</span></div>
+      </div>
+    </div>
+    <div class="detail-legend">Pix casa 1:1 estrito (${fmtBRL(m.tolPix)}); cartão fecha por TOTAL do dia. Colunas de cartão: ✓ igual · ≈ diferença no chip (agregado ↔ resumo mais próximo, best-effort) · ⚠ sem par.</div>
   </div>`;
 }
 
