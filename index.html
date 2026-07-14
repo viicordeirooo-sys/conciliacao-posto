@@ -443,7 +443,7 @@ const PROFILE_SAFRA = {
   matching:{
     modelo:"B",
     pix:{ chave:"bruto" },                 // Pix casa por valor BRUTO (crédito individual D+0)
-    cartao:{ chave:"liquido", tolerance:null },   // Σ liquidoReal ↔ resumo; null → usa config.tolerance
+    cartao:{ chave:"liquido", tolerance:null, tolerancePct:0.5, floor:5 },   // cartão: total do dia; tol = max(0,5% do esperado, R$5)
     antecipacao:{ taxa:0.0176 },           // ANTECIPACAO RV = Σ líquido crédito D-1 × (1 − taxa)
   },
 };
@@ -666,6 +666,10 @@ function sanitizeProfile(p){
   const taxa=Number.isFinite(taxaRaw)?Math.min(Math.max(taxaRaw,0),1):(DEFAULT_PROFILE.matching.antecipacao?.taxa??0);
   const cartTolRaw=p.matching?.cartao?.tolerance;
   const cartTol=(cartTolRaw==null)?null:clampTolerancia(cartTolRaw); // null → herda config.tolerance
+  const cartPctRaw=Number(p.matching?.cartao?.tolerancePct);          // Modelo B: tol % do total de cartão
+  const cartPct=Number.isFinite(cartPctRaw)?Math.min(Math.max(cartPctRaw,0),100):0.5;
+  const cartFloorRaw=Number(p.matching?.cartao?.floor);               // piso em R$ da tol de cartão
+  const cartFloor=Number.isFinite(cartFloorRaw)?Math.min(Math.max(cartFloorRaw,0),100000):5;
   // Prazos de liquidação SafraPay por subtipo — só os 5 subtipos conhecidos, cada
   // um {d:[0,90]}. Ausente → o importador cai no fallback de código SAFRA_LIQ.
   const liqIn=isPlainObject(p.vendas?.liquidacao)?p.vendas.liquidacao:null;
@@ -679,7 +683,7 @@ function sanitizeProfile(p){
     matching:{
       modelo,
       pix:{ chave:(p.matching?.pix?.chave==="liquido")?"liquido":"bruto" },
-      cartao:{ chave:(p.matching?.cartao?.chave==="bruto")?"bruto":"liquido", tolerance:cartTol },
+      cartao:{ chave:(p.matching?.cartao?.chave==="bruto")?"bruto":"liquido", tolerance:cartTol, tolerancePct:cartPct, floor:cartFloor },
       antecipacao:{ taxa },
     },
   };
@@ -818,8 +822,13 @@ function enrichBank(e,profile){ return {...e,_cat:classifyBank(e.description,pro
 function isBankConciliavel(cat){ return cat!=="nao_venda" && cat!=="tarifa"; }
 
 function getReconciliation(){
-  const today=todays();
   const profile=profileFor(STATE.config);
+  return profile.matching.modelo==="B" ? getReconciliationB(profile) : getReconciliationA(profile);
+}
+// Modelo A (PagBank/Aruana) — INALTERADO: agrupa por expectedDate, soma banco por data,
+// status por total×total dentro de config.tolerance.
+function getReconciliationA(profile){
+  const today=todays();
   const enriched=STATE.sales.map(enrichSale);
   const groups={};
   enriched.forEach(s=>{
@@ -854,6 +863,92 @@ function getReconciliation(){
     if(groups[date])return; // já coberta por um grupo de vendas
     const actual=bankByDate[date];
     result.push({date,bruto:0,custoMDR:0,liquido:0,sales:[],bandeiras:{},actual,diff:actual,status:"sem_venda"});
+  });
+  return result.sort((a,b)=>b.date.localeCompare(a.date));
+}
+
+// ── Modelo B (Safra/SafraPay) — reconciliação por LANE ──────────────────────────
+// Crédito regular liquida via ANTECIPACAO RV (por bandeira). Demais cartão (débito,
+// pré-débito, pré-crédito) via RESUMO. Pré-crédito NÃO leva fator de antecipação.
+function isAntecipLane(s){ return /Cr[eé]dito/.test(s.modality) && s.sub!=="prepago_cred"; }
+// Itens esperados de um dia: pix individuais (BRUTO) + agregados de cartão. Resumo =
+// Σliquido por (bandeira,modality,sub); antecipação = Σliquido×(1−taxa) por bandeira.
+function expectedItemsB(sales,profile){
+  const taxa=profile.matching?.antecipacao?.taxa||0;
+  const items=[];
+  sales.forEach(s=>{ if(s.modality==="Pix") items.push({kind:"pix",value:round2(s.bruto),n:1,label:"Pix"}); });
+  const gr={};
+  sales.filter(s=>s.modality!=="Pix"&&!isAntecipLane(s)).forEach(s=>{ const k=s.bandeira+"|"+s.modality+"|"+(s.sub||""); (gr[k]=gr[k]||{bandeira:s.bandeira,modality:s.modality,sub:s.sub||"",sum:0,n:0}); gr[k].sum+=s.liquido; gr[k].n++; });
+  Object.values(gr).forEach(g=>items.push({kind:"resumo",value:round2(g.sum),n:g.n,label:`${g.bandeira} ${g.modality}${g.sub?" (pré-pago)":""}`}));
+  const ga={};
+  sales.filter(s=>s.modality!=="Pix"&&isAntecipLane(s)).forEach(s=>{ (ga[s.bandeira]=ga[s.bandeira]||{bandeira:s.bandeira,sum:0,n:0}); ga[s.bandeira].sum+=s.liquido; ga[s.bandeira].n++; });
+  Object.values(ga).forEach(g=>items.push({kind:"antecipacao",value:round2(g.sum*(1-taxa)),n:g.n,label:`${g.bandeira} crédito (antecip.)`}));
+  return items;
+}
+// Pareamento guloso 1:1 por valor (usado na lane Pix). Devolve pares + sobras dos 2 lados.
+function greedyMatchByValue(aVals,bVals,tol){
+  const A=[...aVals].sort((x,y)=>y-x), B=bVals.map((v,i)=>({v,i})).sort((x,y)=>y.v-x.v);
+  const used=new Array(B.length).fill(false); const aOnly=[],pairs=[];
+  A.forEach(a=>{ let h=-1; for(let j=0;j<B.length;j++){ if(!used[j]&&Math.abs(B[j].v-a)<=tol){h=j;break;} } if(h>=0){used[h]=true;pairs.push([a,B[h].v]);}else aOnly.push(a); });
+  return {pairs,aOnly,bOnly:B.filter((_,j)=>!used[j]).map(x=>x.v)};
+}
+function getReconciliationB(profile){
+  const today=todays();
+  const tolPix=STATE.config.tolerance;
+  const pctCart=profile.matching?.cartao?.tolerancePct??0.5;
+  const floorCart=profile.matching?.cartao?.floor??5;
+  const enriched=STATE.sales.map(enrichSale);
+  // Partição por expectedDate (mesma do A). Janela de vendas p/ os guardas de borda.
+  const groups={};
+  enriched.forEach(s=>{
+    const k=s.expectedDate;
+    if(!groups[k])groups[k]={date:k,bruto:0,custoMDR:0,liquido:0,sales:[],bandeiras:{}};
+    groups[k].bruto+=s.bruto; groups[k].custoMDR+=s.custoMDR; groups[k].liquido+=s.liquido;
+    groups[k].sales.push(s); groups[k].bandeiras[s.bandeira]=(groups[k].bandeiras[s.bandeira]||0)+s.bruto;
+  });
+  const saleDates=enriched.map(s=>s.date).filter(Boolean).sort();
+  const salesMinDate=saleDates[0]||"", salesMaxDate=saleDates[saleDates.length-1]||"";
+  // Banco elegível por data e por LANE. Cartão em data ≤ salesMinDate = pré-janela (informativo).
+  const bankByDate={};
+  STATE.bank.forEach(e=>{
+    const cat=classifyBank(e.description,profile);
+    if(!isBankConciliavel(cat)) return;                 // nao_venda/tarifa fora
+    const bd=bankByDate[e.date]||(bankByDate[e.date]={pix:[],cart:[],pre:[]});
+    const amt=Number(e.amount);
+    if(cat==="venda_pix") bd.pix.push(amt);
+    else if(cat==="venda_cartao_resumo"||cat==="antecipacao"){ (salesMinDate&&e.date<=salesMinDate?bd.pre:bd.cart).push(amt); }
+    // desconhecido: fora do matching do B (surfaced no card "não classificados", sub-commit 4)
+  });
+  const dates=new Set([...Object.keys(groups),...Object.keys(bankByDate)]);
+  const result=[];
+  dates.forEach(E=>{
+    const g=groups[E]||{date:E,bruto:0,custoMDR:0,liquido:0,sales:[],bandeiras:{}};
+    const bd=bankByDate[E]||{pix:[],cart:[],pre:[]};
+    const items=expectedItemsB(g.sales,profile);
+    const pixExp=items.filter(x=>x.kind==="pix").map(x=>x.value);
+    const cartItems=items.filter(x=>x.kind!=="pix");
+    const cartExp=round2(cartItems.reduce((a,x)=>a+x.value,0));
+    const cartBk=round2(bd.cart.reduce((a,x)=>a+x,0));
+    const preWin=round2(bd.pre.reduce((a,x)=>a+x,0));
+    const pixExpTot=round2(pixExp.reduce((a,x)=>a+x,0)), pixBkTot=round2(bd.pix.reduce((a,x)=>a+x,0));
+    // Lane Pix: 1:1 estrito. Lane Cartão: total do dia com tolerância própria.
+    const pm=greedyMatchByValue(pixExp,bd.pix,tolPix);
+    const pixOk=pm.aOnly.length===0&&pm.bOnly.length===0;
+    const cartTol=round2(Math.max(cartExp*pctCart/100,floorCart));
+    const cartDiff=round2(cartBk-cartExp);
+    const cartOk=Math.abs(cartDiff)<=cartTol;
+    const liquido=round2(pixExpTot+cartExp), actual=round2(pixBkTot+cartBk), diff=round2(actual-liquido);
+    const hasExp=items.length>0, hasBank=(bd.pix.length+bd.cart.length)>0;
+    let status,nota="";
+    if(salesMaxDate&&E>salesMaxDate){ status="a_vencer"; nota="pós-janela: aguarda próximo xlsx/extrato"; }
+    else if(!hasExp&&hasBank){ status="sem_venda"; }
+    else if(hasExp&&!hasBank){
+      if(E<today){ const dd=Math.floor((new Date(today)-new Date(E))/86400000); status=dd>=2?"atrasado":"em_aberto"; } else status="a_vencer";
+    }
+    else if(!hasExp&&!hasBank){ status="conciliado"; } // só pré-janela informativo (ou nada)
+    else if(pixOk&&cartOk){ status="conciliado"; }
+    else { status="divergencia"; if(!cartOk&&cartDiff<0&&new Date(E+"T12:00:00").getDay()===1) nota="possível timing de antecipação de fim de semana"; }
+    result.push({...g,liquido,actual,diff,status,_b:{cartItems,pixExp,pixBk:bd.pix,cartBk:bd.cart,cartExp,cartBkTot:cartBk,cartTol,cartDiff,cartOk,pixOk,pixExpTot,pixBkTot,preWin,preN:bd.pre.length,nota}});
   });
   return result.sort((a,b)=>b.date.localeCompare(a.date));
 }
