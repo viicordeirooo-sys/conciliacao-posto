@@ -763,8 +763,26 @@ function enrichSale(s){
   return {...s,taxa,custoMDR,liquido,bruto,expectedDate,taxaSource};
 }
 
+// ── Classificador de lançamentos do extrato (Bloco 1, SÓ-LEITURA) ──────────────
+// Categoria derivada da DESCRIÇÃO via profile.extrato.classificacao (ordenada:
+// 1ª regra que casa vence). Substring case/acento-insensível (_normHdr nos 2 lados).
+// Sem regra → fallback do perfil (nunca "venda"). Rodado na leitura, não persiste
+// → retroativo (reclassifica registros já salvos sem reescrever nada).
+function classifyBank(desc,profile){
+  const d=_normHdr(desc);
+  const rules=profile?.extrato?.classificacao||[];
+  for(const r of rules){ for(const m of (r.match||[])){ if(m && d.includes(_normHdr(m))) return r.cat; } }
+  return profile?.extrato?.fallback||"desconhecido";
+}
+// Anexa a categoria (análogo a enrichSale). Não muta o registro persistido.
+function enrichBank(e,profile){ return {...e,_cat:classifyBank(e.description,profile)}; }
+// Entra na conciliação? nao_venda (rendimento, transferências…) e tarifa ficam FORA
+// do matching/soma/sem_venda. venda_*/antecipacao/desconhecido seguem elegíveis.
+function isBankConciliavel(cat){ return cat!=="nao_venda" && cat!=="tarifa"; }
+
 function getReconciliation(){
   const today=todays();
+  const profile=profileFor(STATE.config);
   const enriched=STATE.sales.map(enrichSale);
   const groups={};
   enriched.forEach(s=>{
@@ -777,7 +795,10 @@ function getReconciliation(){
     groups[k].bandeiras[s.bandeira]=(groups[k].bandeiras[s.bandeira]||0)+s.bruto;
   });
   const bankByDate={};
-  STATE.bank.forEach(e=>{bankByDate[e.date]=(bankByDate[e.date]||0)+Number(e.amount);});
+  STATE.bank.forEach(e=>{
+    if(!isBankConciliavel(classifyBank(e.description,profile))) return; // nao_venda/tarifa fora
+    bankByDate[e.date]=(bankByDate[e.date]||0)+Number(e.amount);
+  });
   const result=Object.values(groups).map(g=>{
     const actual=bankByDate[g.date]||0;
     const diff=round2(actual-g.liquido); // arredonda p/ remover resíduo de float da soma
@@ -1502,8 +1523,9 @@ function getBadge(status){
 // mas os subtotais por coluna funcionam como rede se algum dia vier agregado.
 function matchDayItems(r){
   const tol=STATE.config.tolerance;
+  const profile=profileFor(STATE.config);
   const sales=[...r.sales].sort((a,b)=>b.liquido-a.liquido);
-  const credits=STATE.bank.filter(e=>e.date===r.date)
+  const credits=STATE.bank.filter(e=>e.date===r.date && isBankConciliavel(classifyBank(e.description,profile)))
     .map(e=>({amount:Number(e.amount),description:e.description}))
     .sort((a,b)=>b.amount-a.amount);
   const used=new Array(credits.length).fill(false);
