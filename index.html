@@ -1567,6 +1567,16 @@ function renderConciliacao(){
   const alertNoSale=stats.sem_venda>0?`
     <div class="alert-late" style="background:#1a1033;border-color:#9b59b640;color:#c39bd3">💰 <strong>${stats.sem_venda} depósito${stats.sem_venda>1?"s":""} no banco sem venda correspondente</strong> — entrou dinheiro em data sem venda prevista. Pode faltar lançar a venda, ou a data do depósito não bateu com a prevista (confira prazos/feriados na Config).</div>
   `:"";
+  // Card "não classificados" — SÓ no Modelo B (no A, descrição livre do PagBank é o
+  // normal). Créditos cujo perfil não reconheceu a descrição: nunca entram no matching
+  // (sub-commit 2) e precisam de regra nova no perfil (ou são tarifa/não-venda a mapear).
+  const _profConc=profileFor(STATE.config);
+  const naoClass=_profConc.matching.modelo==="B"
+    ? STATE.bank.filter(e=>Number(e.amount)>0 && (!filterMonth||monthKey(e.date)===filterMonth) && classifyBank(e.description,_profConc)==="desconhecido").length
+    : 0;
+  const alertNaoClass=naoClass>0?`
+    <div class="alert-late" style="background:#1a1033;border-color:#9b59b640;color:#c39bd3">❓ <strong>${naoClass} lançamento${naoClass>1?"s":""} não classificado${naoClass>1?"s":""}</strong> — a descrição do extrato não casou com nenhuma regra do perfil, então ficou fora da conciliação. Revise as regras de classificação na Config.</div>
+  `:"";
 
   const monthOpts=months.map(m=>`<option value="${m}"${filterMonth===m?"selected":""}>${monthLabel(m)}</option>`).join("");
   const statusOpts=["todos","conciliado","divergencia","atrasado","em_aberto","a_vencer","sem_venda"];
@@ -1597,6 +1607,7 @@ function renderConciliacao(){
     ${alertDiv}
     ${alertHtml}
     ${alertNoSale}
+    ${alertNaoClass}
     <div class="stats-row">
       <div class="stat-card" style="border-color:var(--green)"><div class="stat-label">Conciliados</div><div class="stat-value" style="color:var(--green)">${stats.conciliado}</div></div>
       <div class="stat-card" style="border-color:var(--accent)"><div class="stat-label">Divergências</div><div class="stat-value" style="color:var(--accent)">${stats.divergencia}</div></div>
