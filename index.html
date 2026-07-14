@@ -423,7 +423,12 @@ const DEFAULT_PROFILE = {
 const PROFILE_SAFRA = {
   id:"safra-safrapay",
   label:"Banco Safra + SafraPay",
-  vendas:{ parser:"safrapay-xlsx" },
+  vendas:{ parser:"safrapay-xlsx",
+    // Prazos de liquidação por subtipo (dias ÚTEIS, base = data da venda). Congelados
+    // no import em expectedDate. Débito/pré-débito D+1 (RESUMO DEB); crédito D+1
+    // (ANTECIPACAO RV); pré-crédito D+2 (RESUMO CRED); pix D+0 (crédito individual).
+    liquidacao:{ debito:{d:1}, prepago_deb:{d:1}, credito:{d:1}, prepago_cred:{d:2}, pix:{d:0} },
+  },
   extrato:{
     parsers:["safra-pdf","manual"],
     classificacao:[
@@ -442,6 +447,8 @@ const PROFILE_SAFRA = {
     antecipacao:{ taxa:0.0176 },           // ANTECIPACAO RV = Σ líquido crédito D-1 × (1 − taxa)
   },
 };
+// Fallback de código p/ os prazos SafraPay (se o perfil vier sem vendas.liquidacao).
+const SAFRA_LIQ = { debito:1, prepago_deb:1, credito:1, prepago_cred:2, pix:0 };
 
 const DEFAULT_CONFIG = {
   postoName:"Posto 1",
@@ -572,6 +579,7 @@ function normSale(s,i,remote){
   if(s.extId!=null) out.extId=String(s.extId);
   if(s.liquidoReal!=null){ const lr=Number(s.liquidoReal); if(Number.isFinite(lr)&&lr>=0&&lr<=amount) out.liquidoReal=lr; }
   if(typeof s.expectedDate==="string"&&_DATE_RE.test(s.expectedDate)&&!isNaN(new Date(s.expectedDate+"T12:00:00"))) out.expectedDate=s.expectedDate; // preserva data congelada (round-trip); descarta data impossível → fallback calcDeposit
+  if(typeof s.sub==="string"&&(s.sub==="prepago_deb"||s.sub==="prepago_cred")) out.sub=s.sub; // subtipo de liquidação (SafraPay); ausência = débito/crédito/pix normal
   return out;
 }
 // Normaliza/valida uma entrada bancária do JSON importado.
@@ -658,10 +666,15 @@ function sanitizeProfile(p){
   const taxa=Number.isFinite(taxaRaw)?Math.min(Math.max(taxaRaw,0),1):(DEFAULT_PROFILE.matching.antecipacao?.taxa??0);
   const cartTolRaw=p.matching?.cartao?.tolerance;
   const cartTol=(cartTolRaw==null)?null:clampTolerancia(cartTolRaw); // null → herda config.tolerance
+  // Prazos de liquidação SafraPay por subtipo — só os 5 subtipos conhecidos, cada
+  // um {d:[0,90]}. Ausente → o importador cai no fallback de código SAFRA_LIQ.
+  const liqIn=isPlainObject(p.vendas?.liquidacao)?p.vendas.liquidacao:null;
+  let liq=null;
+  if(liqIn){ liq={}; ["debito","prepago_deb","credito","prepago_cred","pix"].forEach(k=>{ if(liqIn[k]!=null) liq[k]={d:clampDiasLiq(liqIn[k]?.d,SAFRA_LIQ[k])}; }); }
   return {
     id:str(p.id,60)||DEFAULT_PROFILE.id,
     label:str(p.label,80)||DEFAULT_PROFILE.label,
-    vendas:{ parser:vParser },
+    vendas:liq?{ parser:vParser, liquidacao:liq }:{ parser:vParser },
     extrato:{ parsers:eParsers.length?eParsers:[...DEFAULT_PROFILE.extrato.parsers], classificacao:cls, fallback:fb },
     matching:{
       modelo,
@@ -1673,6 +1686,22 @@ function renderVendas(){
   const modOpts=MODALITIES.map(m=>`<option value="${m.name}"${vForm.modality===m.name?"selected":""}>${m.name}</option>`).join("");
   const bandOpts=BANDEIRAS.map(b=>`<option value="${b}"${vForm.bandeira===b?"selected":""}>${b}</option>`).join("");
 
+  // Botões de import por perfil (Bloco 3): SafraPay → xlsx de vendas; senão PDF PagBank.
+  const prof=profileFor(STATE.config);
+  const importBtns = prof.vendas.parser==="safrapay-xlsx"
+    ? `<label class="btn btn-dark" style="cursor:pointer">
+          📊 Importar XLSX SafraPay
+          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importVendasSafraXLSX(this)">
+        </label>`
+    : `<label class="btn btn-dark" style="cursor:pointer">
+          📄 Importar PDF PagBank
+          <input type="file" accept=".pdf" style="display:none" onchange="importPDF(this)">
+        </label>
+        <label class="btn btn-dark" style="cursor:pointer;font-size:11px">
+          🔍 Debug PDF
+          <input type="file" accept=".pdf" style="display:none" onchange="runDebugPDF(this)">
+        </label>`;
+
   const rows=enriched.map(s=>{
     const dow=new Date(s.date+"T12:00:00").getDay();
     const isFds=dow===0||dow===6;
@@ -1702,14 +1731,7 @@ function renderVendas(){
       <div id="venda-preview">${vendaPreviewHtml()}</div>
       <div class="btn-row">
         <button class="btn" onclick="addSale()">+ Adicionar</button>
-        <label class="btn btn-dark" style="cursor:pointer">
-          📄 Importar PDF PagBank
-          <input type="file" accept=".pdf" style="display:none" onchange="importPDF(this)">
-        </label>
-        <label class="btn btn-dark" style="cursor:pointer;font-size:11px">
-          🔍 Debug PDF
-          <input type="file" accept=".pdf" style="display:none" onchange="runDebugPDF(this)">
-        </label>
+        ${importBtns}
         <span id="venda-msg"></span>
       </div>
       <div id="pdf-debug" style="display:none;margin-top:12px;background:#060e1a;border:1px solid #1e3450;border-radius:8px;padding:12px">
@@ -2135,6 +2157,91 @@ function parseXlsxBankRows(rows,map){
   return {imported,skipped};
 }
 
+// ── Importador xlsx "Agenda de Vendas" SafraPay (Bloco 3) — puros/testáveis ──────
+// Prazo de liquidação (dias úteis) de um subtipo: perfil.vendas.liquidacao vence;
+// senão cai no fallback de código SAFRA_LIQ.
+function safraPrazo(liqKey,profile){
+  const d=profile?.vendas?.liquidacao?.[liqKey]?.d;
+  return Number.isFinite(d)?d:(SAFRA_LIQ[liqKey]??1);
+}
+// Detecta o cabeçalho pela linha que contém "data da venda" (NÃO hardcode linha 7)
+// e mapeia colunas por nome normalizado. Exige data+modalidade+bruto.
+function mapSafraVendasColumns(rows){
+  const lim=Math.min(rows.length,50);
+  for(let r=0;r<lim;r++){
+    const normd=(rows[r]||[]).map(_normHdr);
+    const find=(...names)=>{ for(const n of names){ const c=normd.findIndex(h=>h.includes(n)); if(c>=0)return c; } return -1; };
+    const dataVenda=find("data da venda"), modalidade=find("modalidade"), valorBruto=find("valor bruto");
+    if(dataVenda>=0&&modalidade>=0&&valorBruto>=0){
+      return { headerRow:r, dataVenda, modalidade, valorBruto,
+        valorLiquido:find("valor liquido"), bandeira:find("bandeira","arranjo"), nsu:find("nsu"), parcela:find("parcela") };
+    }
+  }
+  return null;
+}
+// Modalidade SafraPay → {modality (∈MODALITIES), sub, liqKey}. Ordem: pré-pago ANTES
+// de débito/crédito puros. Crédito parcelado por Parcela (dado real só tem "(1)").
+// Desconhecida → null (o chamador PULA; nunca chuta modalidade).
+function mapSafraModalidade(modStr,parcela){
+  const t=_normHdr(modStr);
+  if(t.includes("pre")&&t.includes("cred")) return {modality:"Crédito À Vista",sub:"prepago_cred",liqKey:"prepago_cred"};
+  if(t.includes("pre")&&t.includes("deb"))  return {modality:"Débito",sub:"prepago_deb",liqKey:"prepago_deb"};
+  if(t.includes("instant")||t==="pix")      return {modality:"Pix",sub:"",liqKey:"pix"};
+  if(t.includes("cred")){
+    const n=parseInt(String(parcela==null?"":parcela).replace(/\D/g,""),10)||1;
+    const modality=n>=7?"Crédito 7–12x":n>=2?"Crédito 2–6x":"Crédito À Vista";
+    return {modality,sub:"",liqKey:"credito"};
+  }
+  if(t.includes("deb")) return {modality:"Débito",sub:"",liqKey:"debito"};
+  return null;
+}
+// Bandeira/Arranjo SafraPay → BANDEIRA (nível marca; o 4c casa por VALOR, não parseia
+// arranjo). Electron→Visa, Maestro/Redeshop→Mastercard, etc.
+function mapSafraBandeira(arr){
+  const t=_normHdr(arr);
+  if(t.includes("visa")||t.includes("electron")) return "Visa";
+  if(t.includes("master")||t.includes("maestro")||t.includes("redeshop")) return "Mastercard";
+  if(t.includes("elo")) return "Elo";
+  if(t.includes("hiper")) return "Hipercard";
+  if(t.includes("amex")||t.includes("american")) return "Amex";
+  if(t.includes("pix")) return "Pix";
+  return "Outro";
+}
+// Linhas de dados → vendas normalizadas (mesma forma do lançamento manual/PDF).
+// Guarda bruto (amount) E líquido (liquidoReal). expectedDate CONGELADO via prazo do
+// perfil. sub só p/ pré-pago. extId sp_<iso>_<nsu>_<bruto> (NSU dá dedupe forte).
+function parseSafraVendasRows(rows,map,profile){
+  const imported=[]; let skipped=0; const suspeitos=[];
+  const holidays=STATE.config.holidays;
+  for(let i=map.headerRow+1;i<rows.length;i++){
+    const row=rows[i]||[];
+    const dateRaw=row[map.dataVenda];
+    if(dateRaw===""||dateRaw==null) continue;             // linha vazia
+    let iso="";
+    if(typeof dateRaw==="string"&&dateRaw.includes("/")){
+      const[d,m,y]=dateRaw.split(/[\/ ]/);
+      if(d&&m&&y) iso=`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+    } else if(typeof dateRaw==="number"){
+      iso=new Date((dateRaw-25569)*86400*1000).toISOString().slice(0,10);   // serial Excel
+    }
+    if(!_DATE_RE.test(iso)||isNaN(new Date(iso+"T12:00:00"))){ skipped++; continue; }
+    const bruto=parseBRLNumber(row[map.valorBruto]);
+    if(!Number.isFinite(bruto)||bruto<=0||bruto>9999999){ skipped++; continue; }
+    const mod=mapSafraModalidade(row[map.modalidade],map.parcela>=0?row[map.parcela]:"");
+    if(!mod){ skipped++; continue; }                      // modalidade desconhecida → nunca chuta
+    const bandeira=mod.liqKey==="pix"?"Pix":mapSafraBandeira(map.bandeira>=0?row[map.bandeira]:"");
+    const nsu=map.nsu>=0?String(row[map.nsu]||"").trim():"";
+    const expectedDate=addBusinessDays(iso,safraPrazo(mod.liqKey,profile),holidays);
+    const sale={id:uid(),extId:`sp_${iso}_${nsu}_${bruto}`.replace(/\s/g,"_"),date:iso,bandeira,modality:mod.modality,amount:bruto,expectedDate};
+    if(mod.sub) sale.sub=mod.sub;
+    const liq=map.valorLiquido>=0?parseBRLNumber(row[map.valorLiquido]):NaN;
+    if(Number.isFinite(liq)&&liq>=0&&liq<=bruto){ sale.liquidoReal=liq; }
+    else if(map.valorLiquido>=0){ sale._suspeito=true; suspeitos.push({date:iso,amount:bruto,motivo:"líquido ausente/fora de faixa"}); }
+    imported.push(sale);
+  }
+  return {imported,skipped,suspeitos};
+}
+
 // XLSX importer for PagBank bank statement
 window.importXLSX=function(input){
   const file=input.files[0]; if(!file) return;
@@ -2186,6 +2293,74 @@ window.importXLSX=function(input){
       renderExtrato();
     }catch(err){
       showMsg("extrato-msg","Erro ao ler XLSX: "+err.message,"err");
+    }
+    input.value="";
+  };
+  reader.readAsArrayBuffer(file);
+};
+
+// XLSX importer for SafraPay "Agenda de Vendas" (vendas). Espelha importXLSX:
+// carrega SheetJS, mapeia cabeçalho, parseia, dedupe por extId (sp_…, NSU forte).
+window.importVendasSafraXLSX=function(input){
+  const file=input.files[0]; if(!file) return;
+  const validXlsxTypes=["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.ms-excel"];
+  if(file.type&&!validXlsxTypes.includes(file.type)&&!file.name.toLowerCase().match(/\.(xlsx|xls)$/)){
+    showMsg("venda-msg","Arquivo inválido. Selecione um XLSX.","err");
+    input.value=""; return;
+  }
+  if(file.size>MAX_FILE_SIZE){
+    showMsg("venda-msg","Arquivo muito grande (máx. 10 MB).","err");
+    input.value=""; return;
+  }
+  showMsg("venda-msg","⏳ Lendo XLSX SafraPay...","ok");
+  const reader=new FileReader();
+  reader.onload=async function(e){
+    try{
+      if(!window.XLSX){
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+          s.onload=res; s.onerror=rej;
+          document.head.appendChild(s);
+        });
+      }
+      const wb=XLSX.read(e.target.result,{type:'array'});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+      const map=mapSafraVendasColumns(rows);
+      if(!map){
+        showMsg("venda-msg",'Cabeçalho não reconhecido — esperado uma linha com "Data da Venda", "Modalidade" e "Valor Bruto".',"err");
+        input.value=""; return;
+      }
+      const noLiq=map.valorLiquido<0;
+      const {imported,skipped,suspeitos}=parseSafraVendasRows(rows,map,profileFor(STATE.config));
+      if(imported.length===0){
+        showMsg("venda-msg",skipped>0?`Nenhuma venda válida. ${skipped} linha(s) ignorada(s) — confira o leiaute.`:"Nenhuma venda encontrada no arquivo.","err");
+        input.value=""; return;
+      }
+      const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
+      const news=imported.filter(s=>!existingIds.has(s.extId));
+      STATE.sales=[...news,...STATE.sales];
+      saveToFirebase();
+      if(skipped>0) console.warn(`[importVendasSafraXLSX] ${skipped} linha(s) ignorada(s) por data/valor/modalidade.`);
+      const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
+      renderVendas();
+      // showMsg DEPOIS do renderVendas (reconstrói #venda-msg), como no importPDF/importXLSX.
+      showMsg("venda-msg",`✅ ${news.length} vendas importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
+      // AVISO de sanidade: coluna de líquido ausente OU linhas sem líquido válido →
+      // essas vendas caem no MDR de config (fallback), não no líquido real do SafraPay.
+      const susps=noLiq?[]:(suspeitos||[]);
+      const pv=document.getElementById("venda-preview");
+      if(pv&&(noLiq||susps.length>0)){
+        const cab=noLiq
+          ? `⚠️ <strong>Coluna "Valor Líquido" não encontrada</strong> — as vendas usarão o MDR da Config (fallback), não o líquido real do SafraPay. O matching de cartão (Σ líquido) pode divergir.`
+          : `⚠️ <strong>${susps.length} de ${imported.length} vendas sem líquido válido</strong> — usarão o MDR da Config (fallback).`;
+        const lim=susps.slice(0,10).map(s=>`<div>• ${escHtml(s.date)} — ${fmtBRL(s.amount)} — ${escHtml(s.motivo)}</div>`).join("");
+        const mais=susps.length>10?`<div style="margin-top:4px">(+${susps.length-10} mais)</div>`:"";
+        pv.innerHTML=`<div class="alert-late" style="background:#1a1400;border-color:#d4a01740;color:#e6c34a">${cab}<div style="margin-top:8px;font-size:11px;line-height:1.6">${lim}${mais}</div></div>`;
+      }
+    }catch(err){
+      showMsg("venda-msg","Erro ao ler XLSX: "+err.message,"err");
     }
     input.value="";
   };
