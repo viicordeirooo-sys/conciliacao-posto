@@ -731,7 +731,24 @@ function getLockedOutMs(){
 let sessionTimer=null;
 function resetSessionTimer(){
   clearTimeout(sessionTimer);
-  sessionTimer=setTimeout(()=>{ signOut(auth); },SESSION_TIMEOUT_MS);
+  sessionTimer=setTimeout(async()=>{
+    // Trava anti-perda: NUNCA desloga por ociosidade com escrita pendente — o ramo
+    // "else" do onAuthStateChanged zera STATE.sales/bank, e o dado não gravado
+    // morreria calado. Flush primeiro; se FALHAR, aborta o logout e deixa o aviso
+    // na tela (mesma semântica de abort do switchPosto). Re-arma o timer: prefere
+    // sessão viva a dado perdido — o operador vê o banner e clica em "Tentar
+    // novamente"; no próximo ciclo tenta de novo.
+    if(_savePending){
+      const ok=await awaitSave();
+      if(!ok){
+        console.error("[sessionTimeout] flush do save pendente falhou — logout automático cancelado");
+        showDataWarning('Há alterações não salvas que não puderam ser gravadas. Logout automático cancelado — clique em "Tentar novamente" no topo antes de fechar a página.');
+        resetSessionTimer();
+        return;
+      }
+    }
+    signOut(auth);
+  },SESSION_TIMEOUT_MS);
 }
 function clearSessionTimer(){
   clearTimeout(sessionTimer);
@@ -1373,6 +1390,41 @@ window.retrySave=function(){
   if(saveTimeout)clearTimeout(saveTimeout);
   flushSave();
 };
+
+// ─── Trava anti-perda de escrita ──────────────────────────────────────────────
+// _savePending é a FONTE DE VERDADE de "há escrita pendente": true desde
+// saveToFirebase(), false SÓ depois da transação commitar (flushSavePaginated) e
+// true de novo se a tx falhar. Cobre os três sub-estados que o rótulo "Salvando…"
+// esconde: debounce armado (nada na rede), tx em voo e falha aguardando retry.
+// setSyncStatus é só cosmético — não decide nada.
+
+// Força a gravação AGORA: cancela o debounce e aguarda o flush. Devolve true se o
+// dado está no Firebase. flushSave NÃO relança (engole o erro e mantém
+// _savePending=true) → o sinal de falha é o _savePending após o await, mesmo
+// contrato usado pelo switchPosto.
+async function awaitSave(){
+  if(saveTimeout){ clearTimeout(saveTimeout); saveTimeout=null; }
+  if(_savePending) await flushSave();
+  return !_savePending;
+}
+
+// Fechar/recarregar/navegar com escrita pendente → diálogo nativo de confirmação.
+// Rede de proteção UNIVERSAL: pega qualquer escrita pendente (import, edição de
+// config, delete), não só os imports. O texto é fixo (browsers ignoram string
+// customizada há anos). No caminho feliz _savePending limpa em ~1s, então isso só
+// aparece quando há problema de verdade.
+window.addEventListener("beforeunload",(e)=>{
+  if(!_savePending) return;
+  e.preventDefault();
+  e.returnValue="";   // exigido por browsers antigos p/ disparar o diálogo
+  return "";
+});
+
+// Aba oculta: o browser estrangula setTimeout em background, o que ADIA o flush de
+// 800ms e alarga a janela de perda. Ao esconder, grava na hora em vez de esperar.
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="hidden" && _savePending) awaitSave();
+});
 
 // ─── Trilha de auditoria (Nível 1, append-only) ───────────────────────────────
 // Best-effort: grava UM doc em audit_log por evento de escrita financeira. SEPARADO
@@ -2031,14 +2083,21 @@ window.importPDF=function(input){
       const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
       const news=imported.filter(s=>!existingIds.has(s.extId));
       STATE.sales=[...news,...STATE.sales];
-      saveToFirebase();
+      saveToFirebase();   // marca _savePending (o awaitSave abaixo cancela o debounce e força o flush)
       if(skipped>0) console.warn(`[importPDF] ${skipped} transação(ões) ignorada(s) por falta de data válida.`);
       const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
       renderVendas();
       // showMsg DEPOIS do renderVendas: o render reconstrói #tab-vendas (e o #venda-msg),
       // então a mensagem de sucesso só sobrevive se escrita após o render (corrige o
       // aviso de sucesso que antes era apagado no mesmo tick).
-      showMsg("venda-msg",`✅ ${news.length} transações importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
+      // AGUARDA o commit antes do ✅: antes, o saveToFirebase era fire-and-forget e o
+      // ✅ significava só "está na memória" — fechar a página no debounce perdia tudo.
+      showMsg("venda-msg","⏳ Salvando no Firebase…","ok");
+      const ok=await awaitSave();   // flush OK re-renderiza a aba (mata o #venda-msg) → msg final DEPOIS
+      showMsg("venda-msg",ok
+        ?`✅ ${news.length} transações importadas! (${imported.length-news.length} duplicatas${skipMsg})`
+        :`⚠️ ${news.length} transações lidas, mas NÃO salvas no Firebase. Não feche a página — clique em "Tentar novamente" no topo.`,
+        ok?"ok":"err");
       // AVISO de sanidade (sub-2): registros marcados como suspeitos pelo parser
       // (bruto ≠ líquido+taxa → possível mudança de layout do PDF). As vendas já
       // entraram em STATE.sales (sem rejeição, sem mudar a dedupe); aqui só ALERTAMOS.
@@ -2540,11 +2599,18 @@ window.importXLSX=function(input){
       const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
       const news=imported.filter(e=>!existingIds.has(e.extId));
       STATE.bank=[...news,...STATE.bank];
-      saveToFirebase();
+      saveToFirebase();   // marca _savePending (o awaitSave abaixo cancela o debounce e força o flush)
       if(skipped>0) console.warn(`[importXLSX] ${skipped} linha(s) ignorada(s) por valor/data não-parseável.`);
       const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
-      showMsg("extrato-msg",`✅ ${news.length} entradas importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
       renderExtrato();
+      // AGUARDA o commit antes do ✅ (ver importPDF). Este é o caminho do bug de
+      // produção: ✅ na tela, página fechada no debounce, extrato com 0 entradas.
+      showMsg("extrato-msg","⏳ Salvando no Firebase…","ok");
+      const ok=await awaitSave();   // flush OK re-renderiza a aba (mata o #extrato-msg) → msg final DEPOIS
+      showMsg("extrato-msg",ok
+        ?`✅ ${news.length} entradas importadas! (${imported.length-news.length} duplicatas${skipMsg})`
+        :`⚠️ ${news.length} entradas lidas, mas NÃO salvas no Firebase. Não feche a página — clique em "Tentar novamente" no topo.`,
+        ok?"ok":"err");
     }catch(err){
       showMsg("extrato-msg","Erro ao ler XLSX: "+err.message,"err");
     }
@@ -2595,12 +2661,18 @@ window.importVendasSafraXLSX=function(input){
       const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
       const news=imported.filter(s=>!existingIds.has(s.extId));
       STATE.sales=[...news,...STATE.sales];
-      saveToFirebase();
+      saveToFirebase();   // marca _savePending (o awaitSave abaixo cancela o debounce e força o flush)
       if(skipped>0) console.warn(`[importVendasSafraXLSX] ${skipped} linha(s) ignorada(s) por data/valor/modalidade.`);
       const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
       renderVendas();
       // showMsg DEPOIS do renderVendas (reconstrói #venda-msg), como no importPDF/importXLSX.
-      showMsg("venda-msg",`✅ ${news.length} vendas importadas! (${imported.length-news.length} duplicatas${skipMsg})`,"ok");
+      // AGUARDA o commit antes do ✅ (ver importPDF).
+      showMsg("venda-msg","⏳ Salvando no Firebase…","ok");
+      const ok=await awaitSave();
+      showMsg("venda-msg",ok
+        ?`✅ ${news.length} vendas importadas! (${imported.length-news.length} duplicatas${skipMsg})`
+        :`⚠️ ${news.length} vendas lidas, mas NÃO salvas no Firebase. Não feche a página — clique em "Tentar novamente" no topo.`,
+        ok?"ok":"err");
       // AVISO de sanidade: coluna de líquido ausente OU linhas sem líquido válido →
       // essas vendas caem no MDR de config (fallback), não no líquido real do SafraPay.
       const susps=noLiq?[]:(suspeitos||[]);
@@ -2661,13 +2733,19 @@ window.importExtratoSafraPDF=function(input){
       const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
       const news=imported.filter(e=>!existingIds.has(e.extId));
       STATE.bank=[...news,...STATE.bank];
-      saveToFirebase();
+      saveToFirebase();   // marca _savePending (o awaitSave abaixo cancela o debounce e força o flush)
       if(skipped>0) console.warn(`[importExtratoSafraPDF] ${skipped} linha(s) ambígua(s) ignorada(s).`);
       renderExtrato();
       // Resumo pós-import (nada de balde silencioso): créditos + débitos ignorados (v1)
       // com contagem de tarifas Pix separada.
       const dbg=debitos.count>0?` ${debitos.count} débito(s) ignorado(s) (${fmtBRL(debitos.total)}), inclui ${tarifas.count} tarifa(s) Pix.`:"";
-      showMsg("extrato-msg",`✅ ${news.length} créditos importados! (${imported.length-news.length} duplicatas)${dbg}`,"ok");
+      // AGUARDA o commit antes do ✅ (ver importPDF).
+      showMsg("extrato-msg","⏳ Salvando no Firebase…","ok");
+      const ok=await awaitSave();
+      showMsg("extrato-msg",ok
+        ?`✅ ${news.length} créditos importados! (${imported.length-news.length} duplicatas)${dbg}`
+        :`⚠️ ${news.length} créditos lidos, mas NÃO salvos no Firebase. Não feche a página — clique em "Tentar novamente" no topo.`,
+        ok?"ok":"err");
     }catch(err){
       showMsg("extrato-msg","Erro ao ler PDF: "+err.message,"err");
     }
