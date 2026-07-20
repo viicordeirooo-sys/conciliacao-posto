@@ -416,6 +416,11 @@ const DEFAULT_MDR = {
 const BANK_CATS = ["venda_pix","venda_cartao_resumo","antecipacao","tarifa","nao_venda","desconhecido"];
 const PROFILE_PARSERS_VENDAS = ["pagbank-pdf","safrapay-xlsx"];
 const PROFILE_PARSERS_EXTRATO = ["pagbank-xlsx","safra-pdf","manual"];
+// Fontes de custo da adquirente (Feature 2). Cada componente do perfil declara uma
+// destas; um resolver por fonte devolve {total,porBandeira,disponivel,nota} read-only
+// sobre STATE. "extrato-debitos" (tarifas Pix) é hoje sempre indisponível — só
+// créditos entram no STATE (invariante amount>0); importar débito real é feature à parte.
+const COST_SOURCES = ["sales-mdr","extrato-antecipacao","extrato-debitos"];
 
 // Perfil DEFAULT (PagBank / Aruana) — Modelo A: match 1:1 por valor (a descrição
 // do PagBank é livre, então o classificador só EXCLUI "Rendimento" como nao_venda;
@@ -430,6 +435,9 @@ const DEFAULT_PROFILE = {
     fallback:"desconhecido",
   },
   matching:{ modelo:"A" },
+  // Custo da adquirente: só MDR (implícito no líquido PagBank). Sem custos → o
+  // sanitizeProfile cairia neste mesmo default, então doc antigo opera idêntico.
+  custos:{ componentes:[ {id:"mdr", label:"MDR", source:"sales-mdr"} ] },
 };
 
 // Perfil KAFISSO (Banco Safra + SafraPay) — Modelo B (misto). Classificação
@@ -461,6 +469,14 @@ const PROFILE_SAFRA = {
     cartao:{ chave:"liquido", tolerance:null, tolerancePct:0.5, floor:5 },   // cartão: total do dia; tol = max(0,5% do esperado, R$5)
     antecipacao:{ taxa:0.0176 },           // ANTECIPACAO RV = Σ líquido crédito D-1 × (1 − taxa)
   },
+  // Custo total da adquirente = MDR (pós-líquido) + antecipação (real do extrato) +
+  // tarifas Pix. Disjuntos (líquido SafraPay é pós-MDR e ANTES da antecipação), somam.
+  // tarifa-pix é débito no extrato → hoje indisponível (só créditos entram).
+  custos:{ componentes:[
+    {id:"mdr",         label:"MDR",              source:"sales-mdr"},
+    {id:"antecipacao", label:"Antecipação",      source:"extrato-antecipacao"},
+    {id:"tarifa-pix",  label:"Tarifas Pix",      source:"extrato-debitos"},
+  ] },
 };
 // Fallback de código p/ os prazos SafraPay (se o perfil vier sem vendas.liquidacao).
 const SAFRA_LIQ = { debito:1, prepago_deb:1, credito:1, prepago_cred:2, pix:0 };
@@ -690,6 +706,14 @@ function sanitizeProfile(p){
   const liqIn=isPlainObject(p.vendas?.liquidacao)?p.vendas.liquidacao:null;
   let liq=null;
   if(liqIn){ liq={}; ["debito","prepago_deb","credito","prepago_cred","pix"].forEach(k=>{ if(liqIn[k]!=null) liq[k]={d:clampDiasLiq(liqIn[k]?.d,SAFRA_LIQ[k])}; }); }
+  // Componentes de custo da adquirente (Feature 2): cada um declara uma fonte da
+  // whitelist COST_SOURCES; source inválida derruba o componente. Ausente/vazio →
+  // cai em [mdr] (retrocompat: doc antigo e PagBank operam como MDR puro).
+  const custIn=Array.isArray(p.custos?.componentes)?p.custos.componentes:[];
+  let cost=custIn.slice(0,12)
+    .filter(c=>COST_SOURCES.includes(c?.source))
+    .map(c=>({ id:str(c.id,40)||c.source, label:str(c.label,60)||c.source, source:c.source }));
+  if(!cost.length) cost=[{id:"mdr", label:"MDR", source:"sales-mdr"}];
   return {
     id:str(p.id,60)||DEFAULT_PROFILE.id,
     label:str(p.label,80)||DEFAULT_PROFILE.label,
@@ -701,6 +725,7 @@ function sanitizeProfile(p){
       cartao:{ chave:(p.matching?.cartao?.chave==="bruto")?"bruto":"liquido", tolerance:cartTol, tolerancePct:cartPct, floor:cartFloor },
       antecipacao:{ taxa },
     },
+    custos:{ componentes:cost },
   };
 }
 
@@ -2858,6 +2883,37 @@ window.clearBank=function(){
 // ─── RESUMO ───────────────────────────────────────────────────────────────────
 let resumoMonth="";
 
+// Feature 2 — resolve UM componente de custo da adquirente para o mês, read-only
+// sobre STATE (ctx.enriched já mapeado; zero reads extras, não toca conciliação).
+// Devolve {total,porBandeira,disponivel,nota}. disponivel:false NUNCA entra no
+// somatório — o card mostra "—"+nota, jamais interpreta ausência como custo zero.
+function resolveCostComponent(source, ctx){
+  const {enriched, month, profile}=ctx;
+  if(source==="sales-mdr"){
+    const ms=enriched.filter(s=>monthKey(s.date)===month);
+    const porBandeira={}; let total=0;
+    ms.forEach(s=>{ total+=s.custoMDR; porBandeira[s.bandeira]=(porBandeira[s.bandeira]||0)+s.custoMDR; });
+    return { total:round2(total), porBandeira, disponivel:true, nota:"" };
+  }
+  if(source==="extrato-antecipacao"){
+    const taxa=profile.matching?.antecipacao?.taxa||0;
+    const lines=STATE.bank.filter(e=>monthKey(e.date)===month && classifyBank(e.description,profile)==="antecipacao");
+    // Sem linhas de antecipação no mês (modo paginado, ou mês sem extrato importado)
+    // → indisponível, NÃO zero: zero mentiria "não houve custo de antecipação".
+    if(!lines.length) return { total:0, porBandeira:{}, disponivel:false, nota:"sem linhas de antecipação no extrato deste mês — importe o extrato (ou navegue o mês no modo paginado)" };
+    // Linha ANTECIPACAO RV = net creditado = base×(1−taxa). Custo real = net×taxa/(1−taxa).
+    const net=lines.reduce((a,e)=>a+Number(e.amount),0);
+    const fee=(taxa>0&&taxa<1)?net*taxa/(1-taxa):0;
+    return { total:round2(fee), porBandeira:{}, disponivel:true, nota:"custo real do extrato — sem quebra por bandeira (linha única ANTECIPACAO RV)" };
+  }
+  if(source==="extrato-debitos"){
+    // Opção C: tarifas Pix são DÉBITO no extrato; hoje só créditos entram (invariante
+    // amount>0). Importar o débito real é feature à parte — aqui só sinaliza.
+    return { total:0, porBandeira:{}, disponivel:false, nota:"requer importar os débitos do extrato — hoje só créditos entram" };
+  }
+  return { total:0, porBandeira:{}, disponivel:false, nota:"fonte de custo desconhecida" };
+}
+
 function renderResumo(){
   const enriched=STATE.sales.map(enrichSale);
   const months=paginatedMode?availableMonths():[...new Set(enriched.map(s=>monthKey(s.date)))].sort().reverse();
@@ -2867,11 +2923,24 @@ function renderResumo(){
   const rec=getReconciliation().filter(r=>monthKey(r.date)===resumoMonth);
 
   const totalBruto=ms.reduce((a,s)=>a+s.bruto,0);
-  const totalMDR=ms.reduce((a,s)=>a+s.custoMDR,0);
   const totalLiquido=ms.reduce((a,s)=>a+s.liquido,0);
   const totalBanco=STATE.bank.filter(e=>monthKey(e.date)===resumoMonth).reduce((a,e)=>a+Number(e.amount),0);
-  const taxaEf=totalBruto>0?totalMDR/totalBruto:0;
   const diff=totalBanco-totalLiquido;
+
+  // Feature 2 — custo total da adquirente = Σ componentes disponíveis do perfil.
+  // Perfil sem custos já cai em [mdr] no sanitize, então PagBank rende idêntico
+  // (só MDR, sem quebra de componentes). Indisponíveis NÃO entram na soma (mostram "—").
+  const profile=profileFor(STATE.config);
+  const costComps=profile.custos.componentes.map(c=>({...c, ...resolveCostComponent(c.source,{enriched,month:resumoMonth,profile})}));
+  const custoTotal=costComps.filter(c=>c.disponivel).reduce((a,c)=>a+c.total,0);
+  const taxaEfCusto=totalBruto>0?custoTotal/totalBruto:0;
+  // Quebra por componente só quando há mais de um (PagBank/MDR puro dispensa).
+  const compBreakdown=costComps.length>1
+    ? `<div class="stat-sub" style="margin-top:6px;line-height:1.55">`+costComps.map(c=>c.disponivel
+        ? `${escHtml(c.label)}: <strong>${fmtBRL(c.total)}</strong>`
+        : `${escHtml(c.label)}: — <span style="opacity:.65">(${escHtml(c.nota)})</span>`
+      ).join("<br>")+`</div>`
+    : "";
 
   // Por bandeira
   const pb={};
@@ -2949,7 +3018,7 @@ function renderResumo(){
     </div>
     <div class="resumo-grid">
       <div class="stat-card" style="border-color:var(--purple)"><div class="stat-label">Total Bruto</div><div class="stat-value" style="color:var(--purple);font-size:16px">${fmtBRL(totalBruto)}</div></div>
-      <div class="stat-card" style="border-color:var(--red)"><div class="stat-label">Custo MDR</div><div class="stat-value" style="color:var(--red);font-size:16px">${fmtBRL(totalMDR)}</div><div class="stat-sub">Taxa efetiva: ${pct(taxaEf*100)}</div></div>
+      <div class="stat-card" style="border-color:var(--red)"><div class="stat-label">Custo total da adquirente — ${monthLabel(resumoMonth)}</div><div class="stat-value" style="color:var(--red);font-size:16px">${fmtBRL(custoTotal)}</div><div class="stat-sub">Taxa efetiva: ${pct(taxaEfCusto*100)}</div>${compBreakdown}</div>
       <div class="stat-card" style="border-color:var(--green)"><div class="stat-label">Líquido Esperado</div><div class="stat-value" style="color:var(--green);font-size:16px">${fmtBRL(totalLiquido)}</div></div>
       <div class="stat-card" style="border-color:var(--blue)"><div class="stat-label">Entrou no Banco</div><div class="stat-value" style="color:var(--blue);font-size:16px">${fmtBRL(totalBanco)}</div></div>
       <div class="stat-card" style="border-color:${Math.abs(diff)<1?"var(--green)":"var(--accent)"}"><div class="stat-label">Diferença</div><div class="stat-value" style="color:${Math.abs(diff)<1?"var(--green)":"var(--accent)"};font-size:16px">${fmtBRL(diff)}</div></div>
