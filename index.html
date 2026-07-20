@@ -1648,7 +1648,11 @@ function renderConciliacao(){
     totalBruto:paginatedMode?recStats.reduce((a,r)=>a+r.bruto,0):enriched.reduce((a,s)=>a+s.bruto,0),
     totalMDR:paginatedMode?recStats.reduce((a,r)=>a+r.custoMDR,0):enriched.reduce((a,s)=>a+s.custoMDR,0),
     totalLiquido:paginatedMode?recStats.reduce((a,r)=>a+r.liquido,0):enriched.reduce((a,s)=>a+s.liquido,0),
-    totalBanco:paginatedMode?recStats.reduce((a,r)=>a+r.actual,0):STATE.bank.reduce((a,e)=>a+Number(e.amount),0),
+    // Banco = Σ crédito CONCILIÁVEL (via r.actual), nos dois ramos. O ramo não-paginado
+    // somava STATE.bank cru — incluía nao_venda/tarifa (transf., PIX de 3º), inflando o
+    // total em Modelo B. Σ recStats.actual cobre cada data conciliável 1×; mesmo escopo
+    // dos stats-irmãos (recStats). Ver renderResumo (mesmo critério, month-scoped).
+    totalBanco:recStats.reduce((a,r)=>a+r.actual,0),
   };
 
   let filtered=filterStatus==="todos"?rec:rec.filter(r=>r.status===filterStatus);
@@ -2928,7 +2932,10 @@ function renderResumo(){
 
   const totalBruto=ms.reduce((a,s)=>a+s.bruto,0);
   const totalLiquido=ms.reduce((a,s)=>a+s.liquido,0);
-  const totalBanco=STATE.bank.filter(e=>monthKey(e.date)===resumoMonth).reduce((a,e)=>a+Number(e.amount),0);
+  // Banco = Σ crédito CONCILIÁVEL do mês, reusando o rec já filtrado (getReconciliation
+  // exclui nao_venda/tarifa). Antes somava STATE.bank cru → incluía transf./PIX de 3º,
+  // inflando o "Entrou no banco" e o diff (bug pré-existente). Bate com a Conciliação.
+  const totalBanco=rec.reduce((a,r)=>a+r.actual,0);
   const diff=totalBanco-totalLiquido;
 
   // Feature 2 — custo total da adquirente = Σ componentes disponíveis do perfil.
