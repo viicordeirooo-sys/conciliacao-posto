@@ -707,15 +707,19 @@ function sanitizeProfile(p){
   let liq=null;
   if(liqIn){ liq={}; ["debito","prepago_deb","credito","prepago_cred","pix"].forEach(k=>{ if(liqIn[k]!=null) liq[k]={d:clampDiasLiq(liqIn[k]?.d,SAFRA_LIQ[k])}; }); }
   // Componentes de custo da adquirente (Feature 2): cada um declara uma fonte da
-  // whitelist COST_SOURCES; source inválida derruba o componente. Ausente/vazio →
-  // cai em [mdr] (retrocompat: doc antigo e PagBank operam como MDR puro).
-  const custIn=Array.isArray(p.custos?.componentes)?p.custos.componentes:[];
-  let cost=custIn.slice(0,12)
+  // whitelist COST_SOURCES; source inválida derruba o componente.
+  const pid=str(p.id,60)||DEFAULT_PROFILE.id;
+  const sanCost=arr=>(Array.isArray(arr)?arr:[]).slice(0,12)
     .filter(c=>COST_SOURCES.includes(c?.source))
     .map(c=>({ id:str(c.id,40)||c.source, label:str(c.label,60)||c.source, source:c.source }));
+  let cost=sanCost(p.custos?.componentes);
+  // Ausente/vazio (doc salvo antes da feature) → herda os componentes do perfil-base
+  // embutido PELO ID (Safra → [mdr,antecipacao,tarifa-pix]); NÃO trata como PagBank.
+  if(!cost.length) cost=sanCost(BUILTIN_PROFILES.find(x=>x.id===pid)?.custos?.componentes);
+  // Id desconhecido / base sem custos → MDR puro (retrocompat mínima).
   if(!cost.length) cost=[{id:"mdr", label:"MDR", source:"sales-mdr"}];
   return {
-    id:str(p.id,60)||DEFAULT_PROFILE.id,
+    id:pid,
     label:str(p.label,80)||DEFAULT_PROFILE.label,
     vendas:liq?{ parser:vParser, liquidacao:liq }:{ parser:vParser },
     extrato:{ parsers:eParsers.length?eParsers:[...DEFAULT_PROFILE.extrato.parsers], classificacao:cls, fallback:fb },
