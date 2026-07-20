@@ -282,6 +282,21 @@ tr:hover td{background:#0a1628}
   </div>
 </div>
 
+<!-- MODAL AVISO REIMPORT (período já tem lançamentos) — Sim/Não, não-destrutivo -->
+<div class="modal-overlay" id="reimport-modal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-header">
+      <strong style="color:#d4a017">⚠️ Período já tem lançamentos</strong>
+      <button class="modal-close" onclick="resolveReimport(false)">✕</button>
+    </div>
+    <div id="reimport-body" style="font-size:13px;color:var(--text);margin-bottom:16px"></div>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="btn" style="background:#d4a017;color:#1a1400" onclick="resolveReimport(true)">Importar mesmo assim</button>
+      <button class="btn btn-dark" onclick="resolveReimport(false)">Cancelar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL EXPORT -->
 <div class="modal-overlay" id="export-modal" style="display:none">
   <div class="modal-box">
@@ -2034,6 +2049,53 @@ window.addSale=function(){
   showMsg("venda-msg","✅ Adicionado!","ok");
 };
 
+// ─── Guarda anti-reimport ─────────────────────────────────────────────────────
+// Antes de mutar STATE, detecta se o arquivo cobre dias que JÁ têm lançamentos do
+// mesmo tipo e pede confirmação. Só INFORMA — não altera a dedupe por extId nem
+// bloqueia. Custo ZERO de reads: no modo paginado usa daysIndex (em memória, cobre
+// todos os dias); no legado agrupa STATE por data. Retorna true = pode importar;
+// false = usuário cancelou. Se não houver sobreposição, retorna true sem modal.
+async function guardaReimport({imported, tipo}){
+  // 1) contagem do ARQUIVO por dia
+  const arqPorDia=new Map();
+  for(const r of imported){ const d=partitionDay(r); if(d) arqPorDia.set(d,(arqPorDia.get(d)||0)+1); }
+
+  // 2) contagem JÁ EXISTENTE por dia (sem read extra)
+  const existePorDia=new Map();
+  if(paginatedMode){
+    const campo=tipo==="sales"?"salesCount":"bankCount";
+    for(const x of daysIndex){ const c=Number(x[campo])||0; if(c>0) existePorDia.set(x.dia,c); }
+  }else{
+    const lista=tipo==="sales"?STATE.sales:STATE.bank;
+    for(const r of lista){ const d=partitionDay(r); if(d) existePorDia.set(d,(existePorDia.get(d)||0)+1); }
+  }
+
+  // 3) dias do arquivo que já têm lançamentos → sobreposição
+  const sobre=[...arqPorDia.keys()].filter(d=>(existePorDia.get(d)||0)>0).sort();
+  if(sobre.length===0) return true;   // nada sobreposto → importa direto, sem aviso
+
+  // 4) monta aviso: tabela por dia + rodapé agregado (X≈Y = assinatura de reimport)
+  const rotulo=tipo==="sales"?"vendas":"créditos";
+  let somaX=0,somaY=0;
+  const linhas=sobre.map(d=>{
+    const x=existePorDia.get(d)||0, y=arqPorDia.get(d)||0; somaX+=x; somaY+=y;
+    return `<tr><td style="padding:3px 10px 3px 0">${escHtml(fmtDate(d))}</td>`+
+           `<td style="padding:3px 10px;text-align:right">${x}</td>`+
+           `<td style="padding:3px 0 3px 10px;text-align:right">${y}</td></tr>`;
+  }).join("");
+  const html=
+    `<p style="margin:0 0 10px">Este arquivo cobre <strong>${sobre.length}</strong> dia(s) que já têm ${rotulo} lançados. `+
+    `Reimportar o mesmo período pode <strong>duplicar</strong> os lançamentos — a dedupe só pega arquivos idênticos.</p>`+
+    `<table style="font-size:12px;border-collapse:collapse;margin:0 0 12px">`+
+    `<thead><tr style="color:var(--muted)"><th style="text-align:left;padding:0 10px 4px 0">Dia</th>`+
+    `<th style="text-align:right;padding:0 10px 4px">Já existe</th>`+
+    `<th style="text-align:right;padding:0 0 4px 10px">No arquivo</th></tr></thead>`+
+    `<tbody>${linhas}</tbody></table>`+
+    `<div style="font-weight:600;color:#d4a017">${sobre.length} dias sobrepostos · ${somaX} ${rotulo} já existem · ${somaY} no arquivo</div>`;
+
+  return await confirmReimport(html);
+}
+
 // PDF importer for PagBank sales report
 window.importPDF=function(input){
   const file=input.files[0]; if(!file) return;
@@ -2078,6 +2140,12 @@ window.importPDF=function(input){
       if(imported.length===0){
         showMsg("venda-msg",skipped>0?`Nenhuma transação válida. ${skipped} linha(s) ignorada(s) — use o botão Debug PDF para conferir o leiaute.`:"Nenhuma transação encontrada no PDF.","err");
         return;
+      }
+      // Guarda anti-reimport: se o período já tem vendas, pede confirmação ANTES de
+      // mutar STATE. Cancelar aborta limpo (nada em STATE, nada salvo).
+      if(!(await guardaReimport({imported, tipo:"sales"}))){
+        showMsg("venda-msg","Import cancelado — nada foi alterado.","err");
+        input.value=""; return;
       }
       // Deduplicate by checking existing ids
       const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
@@ -2596,6 +2664,12 @@ window.importXLSX=function(input){
         showMsg("extrato-msg",skipped>0?`Nenhuma entrada válida. ${skipped} linha(s) ignorada(s) — confira o leiaute do arquivo.`:"Nenhuma entrada encontrada no arquivo.","err");
         return;
       }
+      // Guarda anti-reimport: se o período já tem créditos, pede confirmação ANTES
+      // de mutar STATE. Cancelar aborta limpo (nada em STATE, nada salvo).
+      if(!(await guardaReimport({imported, tipo:"bank"}))){
+        showMsg("extrato-msg","Import cancelado — nada foi alterado.","err");
+        input.value=""; return;
+      }
       const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
       const news=imported.filter(e=>!existingIds.has(e.extId));
       STATE.bank=[...news,...STATE.bank];
@@ -2656,6 +2730,12 @@ window.importVendasSafraXLSX=function(input){
       const {imported,skipped,suspeitos}=parseSafraVendasRows(rows,map,profileFor(STATE.config));
       if(imported.length===0){
         showMsg("venda-msg",skipped>0?`Nenhuma venda válida. ${skipped} linha(s) ignorada(s) — confira o leiaute.`:"Nenhuma venda encontrada no arquivo.","err");
+        input.value=""; return;
+      }
+      // Guarda anti-reimport: se o período já tem vendas, pede confirmação ANTES de
+      // mutar STATE. Cancelar aborta limpo (nada em STATE, nada salvo).
+      if(!(await guardaReimport({imported, tipo:"sales"}))){
+        showMsg("venda-msg","Import cancelado — nada foi alterado.","err");
         input.value=""; return;
       }
       const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
@@ -2728,6 +2808,12 @@ window.importExtratoSafraPDF=function(input){
       const {imported,skipped,debitos,tarifas}=parseSafraExtratoPDF(lines,profileFor(STATE.config));
       if(imported.length===0){
         showMsg("extrato-msg",skipped>0?`Nenhum crédito válido. ${skipped} linha(s) ambígua(s) — confira o leiaute do PDF.`:"Nenhum lançamento de crédito encontrado no PDF.","err");
+        input.value=""; return;
+      }
+      // Guarda anti-reimport: se o período já tem créditos, pede confirmação ANTES
+      // de mutar STATE. Cancelar aborta limpo (nada em STATE, nada salvo).
+      if(!(await guardaReimport({imported, tipo:"bank"}))){
+        showMsg("extrato-msg","Import cancelado — nada foi alterado.","err");
         input.value=""; return;
       }
       const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
@@ -3185,6 +3271,28 @@ window.doConfirmAction=function(){
 window.closeConfirmModal=function(){
   document.getElementById("confirm-modal").style.display="none";
   _confirmCb=null;
+};
+
+// ─── Confirmação de reimport (Sim/Não, não-destrutivo) ────────────────────────
+// Promise-based p/ dar await dentro dos imports. Resolve true = "importar mesmo
+// assim"; false = cancelar/fechar. Diferente do confirm-modal (typed-LIMPAR):
+// aqui não há digitação, é só um aviso que informa sem bloquear.
+let _reimportResolve=null;
+
+function confirmReimport(html){
+  return new Promise((resolve)=>{
+    // Se já houver um aviso em voo (não deveria: import é serial), cancela o antigo.
+    if(_reimportResolve){ const prev=_reimportResolve; _reimportResolve=null; prev(false); }
+    _reimportResolve=resolve;
+    document.getElementById("reimport-body").innerHTML=html;
+    document.getElementById("reimport-modal").style.display="flex";
+  });
+}
+
+window.resolveReimport=function(ok){
+  document.getElementById("reimport-modal").style.display="none";
+  const r=_reimportResolve; _reimportResolve=null;   // captura antes de resolver
+  if(r) r(!!ok);
 };
 
 // ─── Helpers UI ───────────────────────────────────────────────────────────────
