@@ -416,6 +416,15 @@ const DEFAULT_MDR = {
 const BANK_CATS = ["venda_pix","venda_cartao_resumo","antecipacao","tarifa","nao_venda","desconhecido"];
 const PROFILE_PARSERS_VENDAS = ["pagbank-pdf","safrapay-xlsx"];
 const PROFILE_PARSERS_EXTRATO = ["pagbank-xlsx","safra-pdf","manual"];
+// Adquirente do perfil (passo 2): identifica a QUAL provedor o posto pertence, para
+// rejeitar XLSX de outro adquirente no import unificado. Docs legados não têm o campo
+// → derivamos dos parsers já declarados (vendas SafraPay ou extrato Safra ⇒ "safra";
+// senão "pagbank"). "manual" é neutro e não influencia.
+const PROFILE_ACQUIRERS = ["pagbank","safra"];
+function acquirerFromParsers(vParser,eParsers){
+  if(vParser==="safrapay-xlsx"||(Array.isArray(eParsers)&&eParsers.includes("safra-pdf"))) return "safra";
+  return "pagbank";
+}
 // Fontes de custo da adquirente (Feature 2). Cada componente do perfil declara uma
 // destas; um resolver por fonte devolve {total,porBandeira,disponivel,nota} read-only
 // sobre STATE. "extrato-debitos" (tarifas Pix) é hoje sempre indisponível — só
@@ -428,6 +437,7 @@ const COST_SOURCES = ["sales-mdr","extrato-antecipacao","extrato-debitos"];
 const DEFAULT_PROFILE = {
   id:"pagbank-1para1",
   label:"PagBank (1:1)",
+  acquirer:"pagbank",
   vendas:{ parser:"pagbank-pdf" },
   extrato:{
     parsers:["pagbank-xlsx"],
@@ -446,6 +456,7 @@ const DEFAULT_PROFILE = {
 const PROFILE_SAFRA = {
   id:"safra-safrapay",
   label:"Banco Safra + SafraPay",
+  acquirer:"safra",
   vendas:{ parser:"safrapay-xlsx",
     // Prazos de liquidação por subtipo (dias ÚTEIS, base = data da venda). Congelados
     // no import em expectedDate. Débito/pré-débito D+1 (RESUMO DEB); crédito D+1
@@ -684,6 +695,8 @@ function sanitizeProfile(p){
   const vParser=PROFILE_PARSERS_VENDAS.includes(p.vendas?.parser)?p.vendas.parser:DEFAULT_PROFILE.vendas.parser;
   const eParsers=(Array.isArray(p.extrato?.parsers)?p.extrato.parsers:[])
     .filter(x=>PROFILE_PARSERS_EXTRATO.includes(x)).slice(0,8);
+  // Adquirente: respeita o campo salvo se válido; doc legado sem campo → deriva dos parsers.
+  const acquirer=PROFILE_ACQUIRERS.includes(p.acquirer)?p.acquirer:acquirerFromParsers(vParser,eParsers);
   const cls=(Array.isArray(p.extrato?.classificacao)?p.extrato.classificacao:[])
     .slice(0,100)
     .map(r=>({
@@ -721,6 +734,7 @@ function sanitizeProfile(p){
   return {
     id:pid,
     label:str(p.label,80)||DEFAULT_PROFILE.label,
+    acquirer,
     vendas:liq?{ parser:vParser, liquidacao:liq }:{ parser:vParser },
     extrato:{ parsers:eParsers.length?eParsers:[...DEFAULT_PROFILE.extrato.parsers], classificacao:cls, fallback:fb },
     matching:{
@@ -1981,21 +1995,23 @@ function renderVendas(){
   const modOpts=MODALITIES.map(m=>`<option value="${m.name}"${vForm.modality===m.name?"selected":""}>${m.name}</option>`).join("");
   const bandOpts=BANDEIRAS.map(b=>`<option value="${b}"${vForm.bandeira===b?"selected":""}>${b}</option>`).join("");
 
-  // Botões de import por perfil (Bloco 3): SafraPay → xlsx de vendas; senão PDF PagBank.
+  // Botões de import (passo 5): XLSX SEMPRE (dispatcher decide o layout/rejeita); PDF
+  // PagBank + Debug só onde o perfil tem parser PDF de vendas.
   const prof=profileFor(STATE.config);
-  const importBtns = prof.vendas.parser==="safrapay-xlsx"
-    ? `<label class="btn btn-dark" style="cursor:pointer">
-          📊 Importar XLSX SafraPay
-          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importVendasSafraXLSX(this)">
-        </label>`
-    : `<label class="btn btn-dark" style="cursor:pointer">
+  const importBtns=[
+    prof.vendas.parser==="pagbank-pdf"?`<label class="btn btn-dark" style="cursor:pointer">
           📄 Importar PDF PagBank
           <input type="file" accept=".pdf" style="display:none" onchange="importPDF(this)">
         </label>
         <label class="btn btn-dark" style="cursor:pointer;font-size:11px">
           🔍 Debug PDF
           <input type="file" accept=".pdf" style="display:none" onchange="runDebugPDF(this)">
-        </label>`;
+        </label>`:"",
+    `<label class="btn btn-dark" style="cursor:pointer">
+          📊 Importar XLSX
+          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importAnyXLSX(this,'vendas')">
+        </label>`,
+  ].join("");
 
   const rows=enriched.map(s=>{
     const dow=new Date(s.date+"T12:00:00").getDay();
@@ -2406,17 +2422,18 @@ let eForm={date:todays(),description:"",amount:""};
 
 function renderExtrato(){
   const totalDia=STATE.bank.filter(e=>e.date===eForm.date).reduce((a,e)=>a+Number(e.amount),0);
-  // Botões de import por perfil (Bloco 2): Safra → PDF do extrato; PagBank → XLSX.
+  // Botões de import (passo 5): XLSX SEMPRE (dispatcher decide o layout/rejeita); PDF
+  // Safra só onde o perfil tem parser PDF de extrato.
   const eparsers=profileFor(STATE.config).extrato.parsers||[];
   const importBtns=[
     eparsers.includes("safra-pdf")?`<label class="btn btn-dark" style="cursor:pointer">
           📄 Importar PDF Safra
           <input type="file" accept=".pdf" style="display:none" onchange="importExtratoSafraPDF(this)">
         </label>`:"",
-    eparsers.includes("pagbank-xlsx")?`<label class="btn btn-dark" style="cursor:pointer">
-          📊 Importar XLSX PagBank
-          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importXLSX(this)">
-        </label>`:"",
+    `<label class="btn btn-dark" style="cursor:pointer">
+          📊 Importar XLSX
+          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="importAnyXLSX(this,'extrato')">
+        </label>`,
   ].join("");
   const rows=STATE.bank.map(e=>`<tr>
     <td>${fmtDate(e.date)}</td>
@@ -2656,19 +2673,111 @@ function parseSafraExtratoPDF(lines,profile){
   return {imported,skipped,debitos,tarifas,byCat};
 }
 
-// XLSX importer for PagBank bank statement
-window.importXLSX=function(input){
+// ── Detector único de layout XLSX (passo 1) ─────────────────────────────────────
+// Registro declarativo dos layouts XLSX conhecidos. Cada entrada reusa o mapper que
+// JÁ faz find por termo no cabeçalho (mapper devolve não-null = casou). `kind` diz se
+// é arquivo de vendas/extrato (checagem de aba errada) e `acquirer` a qual perfil
+// pertence (rejeição de arquivo de outro posto). Ordem: mais específico primeiro
+// (mais termos obrigatórios). Layouts futuros (PagBank-vendas, Safra-extrato) entram
+// aqui quando houver amostra — nada mais precisa mudar no detector.
+// Aviso pós-commit específico do SafraPay-vendas: líquido ausente/inválido → aquelas
+// vendas caem no MDR da Config (fallback). Mesmo comportamento/HTML de antes; só saiu
+// de dentro do importador para o layout (o dispatcher chama layout.postWarn).
+function safraVendasPostWarn({parsed, map}){
+  const noLiq=map.valorLiquido<0;
+  const susps=noLiq?[]:(parsed.suspeitos||[]);
+  const pv=document.getElementById("venda-preview");
+  if(!pv||!(noLiq||susps.length>0)) return;
+  const cab=noLiq
+    ? `⚠️ <strong>Coluna "Valor Líquido" não encontrada</strong> — as vendas usarão o MDR da Config (fallback), não o líquido real do SafraPay. O matching de cartão (Σ líquido) pode divergir.`
+    : `⚠️ <strong>${susps.length} de ${parsed.imported.length} vendas sem líquido válido</strong> — usarão o MDR da Config (fallback).`;
+  const lim=susps.slice(0,10).map(s=>`<div>• ${escHtml(s.date)} — ${fmtBRL(s.amount)} — ${escHtml(s.motivo)}</div>`).join("");
+  const mais=susps.length>10?`<div style="margin-top:4px">(+${susps.length-10} mais)</div>`:"";
+  pv.innerHTML=`<div class="alert-late" style="background:#1a1400;border-color:#d4a01740;color:#e6c34a">${cab}<div style="margin-top:8px;font-size:11px;line-height:1.6">${lim}${mais}</div></div>`;
+}
+const XLSX_LAYOUTS=[
+  { id:"safrapay-vendas", kind:"sales", acquirer:"safra",   label:"Agenda de Vendas SafraPay", mapper:mapSafraVendasColumns, parser:parseSafraVendasRows, postWarn:safraVendasPostWarn },
+  { id:"pagbank-extrato", kind:"bank",  acquirer:"pagbank", label:"Extrato PagBank (XLSX)",    mapper:mapXlsxColumns,        parser:parseXlsxBankRows },
+];
+// Roda TODOS os mappers e decide. Retorna:
+//   {status:"ok", layout, map}         — exatamente um layout casou
+//   {status:"none"}                    — nenhum casou (cabeçalho não reconhecido)
+//   {status:"ambiguous", matches:[id]} — dois+ casaram (nunca escolhe silenciosamente)
+function detectXlsxLayout(rows){
+  const hits=[];
+  for(const L of XLSX_LAYOUTS){
+    const map=L.mapper(rows);
+    if(map) hits.push({layout:L,map});
+  }
+  if(hits.length===0) return {status:"none"};
+  if(hits.length>1)  return {status:"ambiguous",matches:hits.map(h=>h.layout.id)};
+  return {status:"ok",layout:hits[0].layout,map:hits[0].map};
+}
+
+// ── Rabo de commit unificado dos imports XLSX (passo 3) ─────────────────────────
+// Sequência IDÊNTICA à que os dois importadores XLSX faziam separados, na MESMA
+// ordem — as 4 garantias intactas:
+//   1) guardaReimport ANTES de tocar STATE — cancelar aborta limpo (input.value="", nada salvo)
+//   2) dedupe por extId inalterada
+//   3) saveToFirebase → render → await awaitSave() GATEANDO o ✅ (⚠️ se falhar)
+//   4) showMsg do ✅/⚠️ DEPOIS do render (não é apagada no mesmo tick)
+// Diferenças por aba são só ROTULAGEM (msg element, substantivo, tipo da guarda,
+// texto do console.warn), todas derivadas de `kind`. Retorna null se a guarda
+// cancelar; senão {news, ok} (o chamador de vendas usa p/ o preview de suspeitos).
+async function commitImport({imported, skipped, kind, input}){
+  const isSales=kind==="sales";
+  const msgEl=isSales?"venda-msg":"extrato-msg";
+  // 1) guarda ANTES de mutar STATE. Cancelar aborta limpo (nada em STATE, nada salvo).
+  if(!(await guardaReimport({imported, tipo:isSales?"sales":"bank"}))){
+    showMsg(msgEl,"Import cancelado — nada foi alterado.","err");
+    input.value=""; return null;
+  }
+  // 2) dedupe por extId (inalterada)
+  const list=isSales?STATE.sales:STATE.bank;
+  const existingIds=new Set(list.map(x=>x.extId).filter(Boolean));
+  const news=imported.filter(x=>!existingIds.has(x.extId));
+  if(isSales) STATE.sales=[...news,...STATE.sales];
+  else        STATE.bank =[...news,...STATE.bank];
+  saveToFirebase();   // marca _savePending (o awaitSave abaixo cancela o debounce e força o flush)
+  if(skipped>0){
+    const reason=isSales?"por data/valor/modalidade":"por valor/data não-parseável";
+    const tag=isSales?"importVendasSafraXLSX":"importXLSX";
+    console.warn(`[${tag}] ${skipped} linha(s) ignorada(s) ${reason}.`);
+  }
+  const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
+  if(isSales) renderVendas(); else renderExtrato();
+  // 3) AGUARDA o commit antes do ✅ (trava anti-perda): flush OK re-renderiza a aba
+  //    (mata o #msg) → msg final DEPOIS.
+  showMsg(msgEl,"⏳ Salvando no Firebase…","ok");
+  const ok=await awaitSave();
+  const subst=isSales?"vendas":"entradas";
+  showMsg(msgEl,ok
+    ?`✅ ${news.length} ${subst} importadas! (${imported.length-news.length} duplicatas${skipMsg})`
+    :`⚠️ ${news.length} ${subst} lidas, mas NÃO salvas no Firebase. Não feche a página — clique em "Tentar novamente" no topo.`,
+    ok?"ok":"err");
+  return {news, ok};
+}
+
+// ── Dispatcher único de import XLSX (passo 4) ───────────────────────────────────
+// Um ponto só p/ as duas abas: valida arquivo → carrega SheetJS → detecta layout
+// (passo 1) → checa ABA (#4: arquivo de vendas no extrato e vice-versa) → checa
+// ADQUIRENTE (#5: rejeita XLSX de outro posto) → parser do layout → commitImport
+// (rabo comum, passo 3) → postWarn específico do layout. Nenhuma checagem toca STATE;
+// só o commitImport muta (e ele começa pela guarda). `aba` ∈ {"vendas","extrato"}:
+// a mensagem sai sempre no #msg da aba onde o usuário clicou.
+function importAnyXLSX(input, aba){
+  const msgEl = aba==="vendas" ? "venda-msg" : "extrato-msg";
   const file=input.files[0]; if(!file) return;
   const validXlsxTypes=["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.ms-excel"];
   if(file.type&&!validXlsxTypes.includes(file.type)&&!file.name.toLowerCase().match(/\.(xlsx|xls)$/)){
-    showMsg("extrato-msg","Arquivo inválido. Selecione um XLSX.","err");
+    showMsg(msgEl,"Arquivo inválido. Selecione um XLSX.","err");
     input.value=""; return;
   }
   if(file.size>MAX_FILE_SIZE){
-    showMsg("extrato-msg","Arquivo muito grande (máx. 10 MB).","err");
+    showMsg(msgEl,"Arquivo muito grande (máx. 10 MB).","err");
     input.value=""; return;
   }
-  showMsg("extrato-msg","⏳ Lendo XLSX...","ok");
+  showMsg(msgEl,"⏳ Lendo XLSX...","ok");
   const reader=new FileReader();
   reader.onload=async function(e){
     try{
@@ -2684,127 +2793,57 @@ window.importXLSX=function(input){
       const ws=wb.Sheets[wb.SheetNames[0]];
       const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
 
-      // Detecta o cabeçalho dinamicamente e mapeia colunas por nome (leiaute do
-      // PagBank pode variar nº de linhas de metadados / posição das colunas).
-      const map=mapXlsxColumns(rows);
-      if(!map){
-        showMsg("extrato-msg",'Cabeçalho não reconhecido — esperado uma linha com "Data" e "Entradas". Confira o arquivo.',"err");
+      // Detecção única. Nenhum layout → cabeçalho não reconhecido; dois+ → erro
+      // EXPLÍCITO (nunca escolhe o primeiro hit).
+      const det=detectXlsxLayout(rows);
+      if(det.status==="none"){
+        showMsg(msgEl,'Cabeçalho não reconhecido — o arquivo não corresponde a nenhum layout XLSX conhecido (Extrato PagBank ou Agenda de Vendas SafraPay). Confira o arquivo.',"err");
         input.value=""; return;
       }
-      const {imported,skipped}=parseXlsxBankRows(rows,map);
+      if(det.status==="ambiguous"){
+        showMsg(msgEl,`Arquivo ambíguo — casou com mais de um layout (${escHtml(det.matches.join(", "))}). Não importei para não arriscar; confira o arquivo.`,"err");
+        input.value=""; return;
+      }
+      const layout=det.layout, map=det.map;
+      const prof=profileFor(STATE.config);
 
-      if(imported.length===0){
-        showMsg("extrato-msg",skipped>0?`Nenhuma entrada válida. ${skipped} linha(s) ignorada(s) — confira o leiaute do arquivo.`:"Nenhuma entrada encontrada no arquivo.","err");
-        return;
-      }
-      // Guarda anti-reimport: se o período já tem créditos, pede confirmação ANTES
-      // de mutar STATE. Cancelar aborta limpo (nada em STATE, nada salvo).
-      if(!(await guardaReimport({imported, tipo:"bank"}))){
-        showMsg("extrato-msg","Import cancelado — nada foi alterado.","err");
+      // #4 — arquivo na aba ERRADA: mensagem específica dizendo pra onde levar. Nada mutado.
+      const expectedKind = aba==="vendas" ? "sales" : "bank";
+      if(layout.kind!==expectedKind){
+        const ehVenda=layout.kind==="sales";
+        showMsg(msgEl,`Isto é um arquivo de ${ehVenda?"vendas":"extrato"} (${escHtml(layout.label)}). Importe na aba ${ehVenda?"Vendas":"Extrato"}, não em ${ehVenda?"Extrato":"Vendas"}.`,"err");
         input.value=""; return;
       }
-      const existingIds=new Set(STATE.bank.map(e=>e.extId).filter(Boolean));
-      const news=imported.filter(e=>!existingIds.has(e.extId));
-      STATE.bank=[...news,...STATE.bank];
-      saveToFirebase();   // marca _savePending (o awaitSave abaixo cancela o debounce e força o flush)
-      if(skipped>0) console.warn(`[importXLSX] ${skipped} linha(s) ignorada(s) por valor/data não-parseável.`);
-      const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
-      renderExtrato();
-      // AGUARDA o commit antes do ✅ (ver importPDF). Este é o caminho do bug de
-      // produção: ✅ na tela, página fechada no debounce, extrato com 0 entradas.
-      showMsg("extrato-msg","⏳ Salvando no Firebase…","ok");
-      const ok=await awaitSave();   // flush OK re-renderiza a aba (mata o #extrato-msg) → msg final DEPOIS
-      showMsg("extrato-msg",ok
-        ?`✅ ${news.length} entradas importadas! (${imported.length-news.length} duplicatas${skipMsg})`
-        :`⚠️ ${news.length} entradas lidas, mas NÃO salvas no Firebase. Não feche a página — clique em "Tentar novamente" no topo.`,
-        ok?"ok":"err");
+      // #5 — arquivo de OUTRO adquirente: rejeita. Importar venda de outro adquirente
+      // no posto errado é pior que não importar. Nada mutado.
+      if(layout.acquirer!==prof.acquirer){
+        const nome={pagbank:"PagBank",safra:"SafraPay / Banco Safra"};
+        showMsg(msgEl,`Este arquivo é do adquirente ${escHtml(nome[layout.acquirer]||layout.acquirer)}, mas o posto ativo usa o perfil ${escHtml(prof.label)}. Troque o posto ou o perfil antes de importar.`,"err");
+        input.value=""; return;
+      }
+
+      // Parser do layout. Assinaturas diferem (parseXlsxBankRows(rows,map) ignora o 3º
+      // arg; parseSafraVendasRows(rows,map,profile) usa) — passar prof sempre é seguro.
+      const parsed=layout.parser(rows,map,prof);
+      if(parsed.imported.length===0){
+        const subst=layout.kind==="sales"?"venda":"entrada";
+        showMsg(msgEl,parsed.skipped>0
+          ?`Nenhuma ${subst} válida. ${parsed.skipped} linha(s) ignorada(s) — confira o leiaute.`
+          :`Nenhuma ${subst} encontrada no arquivo.`,"err");
+        input.value=""; return;
+      }
+      // Rabo unificado (passo 3): guarda → dedupe extId → save → render → awaitSave → ✅.
+      // Retorna null se a guarda cancelar (nada mutado) → pula o postWarn.
+      const res=await commitImport({imported:parsed.imported, skipped:parsed.skipped, kind:layout.kind, input});
+      if(res && layout.postWarn) layout.postWarn({parsed, map, aba});
     }catch(err){
-      showMsg("extrato-msg","Erro ao ler XLSX: "+err.message,"err");
+      showMsg(msgEl,"Erro ao ler XLSX: "+err.message,"err");
     }
     input.value="";
   };
   reader.readAsArrayBuffer(file);
-};
-
-// XLSX importer for SafraPay "Agenda de Vendas" (vendas). Espelha importXLSX:
-// carrega SheetJS, mapeia cabeçalho, parseia, dedupe por extId (sp_…, NSU forte).
-window.importVendasSafraXLSX=function(input){
-  const file=input.files[0]; if(!file) return;
-  const validXlsxTypes=["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.ms-excel"];
-  if(file.type&&!validXlsxTypes.includes(file.type)&&!file.name.toLowerCase().match(/\.(xlsx|xls)$/)){
-    showMsg("venda-msg","Arquivo inválido. Selecione um XLSX.","err");
-    input.value=""; return;
-  }
-  if(file.size>MAX_FILE_SIZE){
-    showMsg("venda-msg","Arquivo muito grande (máx. 10 MB).","err");
-    input.value=""; return;
-  }
-  showMsg("venda-msg","⏳ Lendo XLSX SafraPay...","ok");
-  const reader=new FileReader();
-  reader.onload=async function(e){
-    try{
-      if(!window.XLSX){
-        await new Promise((res,rej)=>{
-          const s=document.createElement('script');
-          s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-          s.onload=res; s.onerror=rej;
-          document.head.appendChild(s);
-        });
-      }
-      const wb=XLSX.read(e.target.result,{type:'array'});
-      const ws=wb.Sheets[wb.SheetNames[0]];
-      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
-      const map=mapSafraVendasColumns(rows);
-      if(!map){
-        showMsg("venda-msg",'Cabeçalho não reconhecido — esperado uma linha com "Data da Venda", "Modalidade" e "Valor Bruto".',"err");
-        input.value=""; return;
-      }
-      const noLiq=map.valorLiquido<0;
-      const {imported,skipped,suspeitos}=parseSafraVendasRows(rows,map,profileFor(STATE.config));
-      if(imported.length===0){
-        showMsg("venda-msg",skipped>0?`Nenhuma venda válida. ${skipped} linha(s) ignorada(s) — confira o leiaute.`:"Nenhuma venda encontrada no arquivo.","err");
-        input.value=""; return;
-      }
-      // Guarda anti-reimport: se o período já tem vendas, pede confirmação ANTES de
-      // mutar STATE. Cancelar aborta limpo (nada em STATE, nada salvo).
-      if(!(await guardaReimport({imported, tipo:"sales"}))){
-        showMsg("venda-msg","Import cancelado — nada foi alterado.","err");
-        input.value=""; return;
-      }
-      const existingIds=new Set(STATE.sales.map(s=>s.extId).filter(Boolean));
-      const news=imported.filter(s=>!existingIds.has(s.extId));
-      STATE.sales=[...news,...STATE.sales];
-      saveToFirebase();   // marca _savePending (o awaitSave abaixo cancela o debounce e força o flush)
-      if(skipped>0) console.warn(`[importVendasSafraXLSX] ${skipped} linha(s) ignorada(s) por data/valor/modalidade.`);
-      const skipMsg=skipped>0?`, ${skipped} ignorada(s)`:"";
-      renderVendas();
-      // showMsg DEPOIS do renderVendas (reconstrói #venda-msg), como no importPDF/importXLSX.
-      // AGUARDA o commit antes do ✅ (ver importPDF).
-      showMsg("venda-msg","⏳ Salvando no Firebase…","ok");
-      const ok=await awaitSave();
-      showMsg("venda-msg",ok
-        ?`✅ ${news.length} vendas importadas! (${imported.length-news.length} duplicatas${skipMsg})`
-        :`⚠️ ${news.length} vendas lidas, mas NÃO salvas no Firebase. Não feche a página — clique em "Tentar novamente" no topo.`,
-        ok?"ok":"err");
-      // AVISO de sanidade: coluna de líquido ausente OU linhas sem líquido válido →
-      // essas vendas caem no MDR de config (fallback), não no líquido real do SafraPay.
-      const susps=noLiq?[]:(suspeitos||[]);
-      const pv=document.getElementById("venda-preview");
-      if(pv&&(noLiq||susps.length>0)){
-        const cab=noLiq
-          ? `⚠️ <strong>Coluna "Valor Líquido" não encontrada</strong> — as vendas usarão o MDR da Config (fallback), não o líquido real do SafraPay. O matching de cartão (Σ líquido) pode divergir.`
-          : `⚠️ <strong>${susps.length} de ${imported.length} vendas sem líquido válido</strong> — usarão o MDR da Config (fallback).`;
-        const lim=susps.slice(0,10).map(s=>`<div>• ${escHtml(s.date)} — ${fmtBRL(s.amount)} — ${escHtml(s.motivo)}</div>`).join("");
-        const mais=susps.length>10?`<div style="margin-top:4px">(+${susps.length-10} mais)</div>`:"";
-        pv.innerHTML=`<div class="alert-late" style="background:#1a1400;border-color:#d4a01740;color:#e6c34a">${cab}<div style="margin-top:8px;font-size:11px;line-height:1.6">${lim}${mais}</div></div>`;
-      }
-    }catch(err){
-      showMsg("venda-msg","Erro ao ler XLSX: "+err.message,"err");
-    }
-    input.value="";
-  };
-  reader.readAsArrayBuffer(file);
-};
+}
+window.importAnyXLSX=importAnyXLSX;
 
 // PDF importer for Banco Safra bank statement (extrato). Espelha importPDF no
 // carregamento do pdf.js; reconstrói linhas por posição e chama parseSafraExtratoPDF.
